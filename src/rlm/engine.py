@@ -68,7 +68,7 @@ from rlm.refinement import (
     rollback_proposal,
 )
 from rlm.session import Session
-from rlm.staircase import Block, Staircase
+from rlm.staircase import Block, Staircase, select_tail
 from rlm.skills import enable_builtin_skills
 from rlm.supervisor import SessionTreeSupervisor
 from rlm.tools import (
@@ -247,6 +247,7 @@ class RLMEngine:
         self.max_compactions = config.policy.max_compactions
         self.max_compaction_attempts = config.policy.max_compaction_attempts
         self._staircase = Staircase(config.policy.compaction_fanout)
+        self.compaction_tail_tokens = config.policy.compaction_tail_tokens
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt
         self.max_depth = config.policy.max_depth
@@ -1268,8 +1269,9 @@ class RLMEngine:
 
         The branch summary is a checkpoint call over the live context; its block is
         appended to the staircase and any tier that just filled is rolled up by side
-        calls. The new window is ``[system, user(framing + staircase)]``, with the
-        IPython kernel preserved. Side calls are housekeeping, not work turns: they do
+        calls. The new window is ``[system, user(framing + staircase), *tail]``: the
+        most recent messages that fit ``compaction_tail_tokens`` stay verbatim, keeping
+        their ledger indices, and the IPython kernel is preserved. Side calls are housekeeping, not work turns: they do
         not count toward ``max_total_turns``, while their tokens land in
         ``_total_usage`` and count toward token budgets. Every committed side request
         remains represented in the semantic graph.
@@ -1278,10 +1280,21 @@ class RLMEngine:
         and prime-rl's trajectory extension property across compaction.
         ``tool_choice="none"`` forbids tool calls in side responses.
         """
-        dropped_chars = _count_messages_chars(messages[1:])
+        indices = self.session.context_indices
+        tail_start = select_tail(
+            messages, indices, self._branch_first_index, self._tail_budget()
+        )
+        tail = messages[tail_start:]
+        dropped_chars = _count_messages_chars(messages[1:tail_start])
         turns_since_last = turn + 1 - self._branch_start_turn
 
         checkpoint_prompt = CHECKPOINT_PROMPT
+        if tail:
+            checkpoint_prompt += (
+                f"\n\nThe last {len(tail)} messages of the conversation remain in context "
+                "verbatim after compaction: cover what precedes them and how the current "
+                "state came to be."
+            )
         if self._repl is not None:
             checkpoint_prompt += REPL_NOTE
         if self._prompt_kernel_notices:
@@ -1300,7 +1313,10 @@ class RLMEngine:
                     self._staircase.branch_count,
                     self._staircase.branch_count + 1,
                 ),
-                messages=(self._branch_first_index, self.session.message_count - 1),
+                messages=(
+                    self._branch_first_index,
+                    indices[tail_start] - 1 if tail else self.session.message_count - 1,
+                ),
                 windows=(self._branch_first_window, self.session.window),
                 turns=(self._branch_start_turn, turn),
                 summary=summary_text,
@@ -1326,7 +1342,7 @@ class RLMEngine:
             + drilldown_note(str(self.session.dir / "messages.jsonl")),
         )
         window = self.session.replace_context(
-            [system_msg, compaction_message],
+            [system_msg, compaction_message, *tail],
             reason="compaction",
         )
         self._last_good = len(self.session.messages)
@@ -1341,6 +1357,7 @@ class RLMEngine:
                 "summary": summary_text,
                 "block": block.to_record(),
                 "rollups_sealed": sealed,
+                "tail_message_indices": list(indices[tail_start:]),
                 "provenance": provenance,
                 "window": window,
                 "summary_message_index": self.session.context_indices[-1],
@@ -1363,10 +1380,18 @@ class RLMEngine:
             )
         )
         self._branch_start_turn = turn + 1
-        self._branch_first_index = self.session.message_count
+        # The kept tail opens the next branch, so block ranges stay gapless.
+        self._branch_first_index = (
+            indices[tail_start] if tail else self.session.message_count
+        )
         self._branch_first_window = window
         self._metrics.turns_since_last_compaction = 0
         self._compact_refine_pending = True
+
+    def _tail_budget(self) -> int:
+        if self.summarize_at_tokens is None:
+            return self.compaction_tail_tokens
+        return min(self.compaction_tail_tokens, self.summarize_at_tokens // 4)
 
     async def _branch_summary(
         self, messages: list[dict], checkpoint_prompt: str, compaction: Compaction
@@ -1525,6 +1550,7 @@ class RLMEngine:
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "compaction_fanout": self._staircase.fanout,
+                "compaction_tail_tokens": self.compaction_tail_tokens,
                 "allow_git": self.runtime_config.policy.allow_git,
                 "harness_enabled": self.harness_config.enabled,
                 "harness_global": self.harness_config.global_dir is not None,
