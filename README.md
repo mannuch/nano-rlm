@@ -173,13 +173,98 @@ The supervisor owns inboxes and instruction queues. Each agent's `inbox.jsonl` r
 
 There is no model-driven compaction tool. Compaction is on by default and unlimited (the policy's `compaction` field turns it off, `max_compactions` caps it); the default 1M `max_total_tokens` tree budget keeps sessions bounded, since each compaction cycle itself spends new tokens. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it; small windows keep at least half. Set `summarize_at_tokens` to pin the threshold explicitly. Without a known window or explicit threshold, proactive compaction stays off, but a provider overflow still triggers it reactively. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.
 
-Compaction is tiered, after headlong's memory pyramid. The context since the last compaction is a *branch*. The engine asks the model, in context, for a plain-text handoff summary of that branch (reasoning is never part of it) and records it as a tier-1 *block* naming the ledger messages, context windows, and turns it covers. Every `compaction_fanout` (default 5) consecutive blocks of one tier are merged into one block of the next tier by a side call over those summaries alone, so tier k covers fanout^(k-1) branches. The fresh window is `[system, staircase, tail]`: the blocks listed oldest first at decreasing resolution, decomposed in base fanout so each tier contributes at most fanout - 1 blocks and the coarsest reaches back to the first message, followed by the most recent messages verbatim. Blocks are immutable and the raw ledger stays the source of truth: each header is a pointer the model can expand through `history()`. One compaction spends at most `max_compaction_attempts` rollup calls in total (the usual cycle needs none or one); a rollup that yields no usable reply or does not fit that budget is skipped, the staircase shows its finer blocks instead, and the next compaction retries it, newest ranges first.
+Compaction is tiered, after headlong's memory pyramid: instead of replacing the window with one summary that every later compaction re-summarizes, the engine keeps the whole session in context at decreasing resolution and keeps the newest messages verbatim.
 
-The tail is the newest run of messages that fits `compaction_tail_tokens` (default 12k, capped at a quarter of the compaction threshold; 0 keeps none). It opens with an assistant or user message so no tool result is separated from its call, never reaches the branch's first message, and is re-attached by ledger index rather than copied: the new `context_window` lists those existing indices after the staircase message. The summary request is told how many messages will stay verbatim, the branch block ends just before them, and the kept tail opens the next branch, so block ranges stay gapless.
+### Branches and blocks
+
+The context since the last compaction is a *branch*. When a branch is compacted, the engine asks the model, in context, for a plain-text handoff summary of that branch (reasoning is never part of it) and records it as a tier-1 *block*. A block is immutable and is a pointer into the ledger: its header names the message, window, and turn ranges it summarizes, so the raw `messages.jsonl` stays the source of truth and the summary is an index into it.
+
+```text
+[tier 1 | branch 3 | window 3 | messages 412-1180 | turns 88-131]
+Ran the integration suite against the new parser; 3 failures remain in
+tests/test_edges.py (see h.messages[1104]). Fixed the tokenizer off-by-one in
+src/lex.py. Open: the `--strict` flag is still unhandled.
+```
+
+The ranges are supplied by the engine, never by the model, so they are exact.
+
+### Rollups
+
+Every `compaction_fanout` (default 5, written `F` below) consecutive blocks of one tier are merged into one block of the next tier by a side call over those summaries alone: tier 2 summarizes `F` branches, tier 3 summarizes `F^2`, tier k summarizes `F^(k-1)`. A rollup never sees the live context, only the child blocks, so it costs about `F` summaries' worth of input regardless of how long the session is.
+
+| tier | one block summarizes  | one block covers   | built from     |
+| ---- | --------------------- | ------------------ | -------------- |
+| 1    | the branch itself     | 1 branch           | the live context |
+| 2    | `F` tier-1 blocks     | `F` branches       | tier 1         |
+| 3    | `F` tier-2 blocks     | `F^2` branches     | tier 2         |
+| k    | `F` tier-(k-1) blocks | `F^(k-1)` branches | tier k-1       |
+
+A rollup seals as soon as its `F` children exist and is then never rebuilt; only the frontier is ever summarized, so the lifetime cost is about `N / (F - 1)` small calls for `N` compactions. A rolled-up range keeps its children's message range: a tier-3 block over branches 0-24 covers exactly the messages those branches covered.
+
+### The staircase
+
+The fresh window after a compaction is `[system, staircase, tail]`. The staircase lists blocks oldest first at decreasing resolution: the branch count `N` is decomposed in base `F`, and tier k contributes the aligned blocks just older than the finer tiers, at most `F - 1` of them. The coarsest block always starts at branch 0, so nothing in the session is unrepresented, and the whole staircase is bounded by `(F - 1) * log_F(N)` blocks.
+
+With `F = 2` the layout after each compaction is:
+
+```text
+compactions  staircase (oldest first)
+     1       [t1: 0]
+     2       [t2: 0-1]
+     3       [t2: 0-1] [t1: 2]
+     4       [t3: 0-3]
+     5       [t3: 0-3] [t1: 4]
+     6       [t3: 0-3] [t2: 4-5]
+     7       [t3: 0-3] [t2: 4-5] [t1: 6]
+     8       [t4: 0-7]
+     9       [t4: 0-7] [t1: 8]
+```
+
+Read left to right as decreasing age and increasing resolution: the far past is a single paragraph, the middle is folded into pairs, and the most recent branch is a full summary. With the default `F = 5` a session's first four compactions show every branch summary verbatim; the fifth folds them into one tier-2 block.
+
+If a rollup is missing (it failed, or has not been attempted yet) the staircase shows its children instead, so coverage is never lost: at 4 compactions with `[t3: 0-3]` unsealed the staircase reads `[t2: 0-1] [t2: 2-3]`, and with one of those missing too it reads `[t1: 0] [t1: 1] [t2: 2-3]`.
+
+### The verbatim tail
+
+The staircase is followed by the newest run of messages that fits `compaction_tail_tokens` (default 12k, capped at a quarter of the compaction threshold; 0 keeps none), so the exact last tool results survive compaction instead of being paraphrased. The tail opens with an assistant or user message so no tool result is separated from its call, and never reaches the branch's first message. It is re-attached by ledger index rather than copied: the new `context_window` record lists those existing indices after the staircase message, exactly as a rollback re-lists restored messages.
+
+```text
+ledger index   0       1     2     3       4        5     6       7
+record         system  task  call  result  stairc.  call  result  stairc.
+
+window 0       [0, 1, 2, 3]                       <- first branch
+compaction 1   block A = messages 1-1, tail = [2, 3]
+window 1       [0, 4, 2, 3, 5, 6]                 <- system, staircase, tail, new work
+compaction 2   block B = messages 2-4, tail = [5, 6]
+window 2       [0, 7, 5, 6]
+```
+
+This toy session has one call per branch, so the tail takes nearly all of it; in practice a branch holds far more than its tail. The summary request is told how many messages will stay verbatim so it covers what precedes them; the branch block ends just before the tail, and the kept tail opens the next branch, so block message ranges stay gapless (block B above starts where block A's tail started).
+
+### Drill-down
+
+The compaction message names the ledger path and the history API, and every block header is a range the model can expand:
+
+```python
+from rlm import history
+
+h = await history()
+h.blocks                                     # [{"tier": 1, "branches": [0, 1], "messages": [1, 1], ...}, ...]
+a, b = h.blocks[-1]["messages"]
+h.messages[a : b + 1]                        # what the newest block summarizes
+```
+
+`h.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
+
+### Budgets and failure
+
+Rollups are best effort: one compaction spends at most `max_compaction_attempts` rollup calls in total (the usual cycle needs none or one), a rollup that yields no usable reply or does not fit that budget is skipped, and the next compaction retries it, newest ranges first, so a range that keeps failing cannot starve fresh ones.
 
 A provider overflow (a 400 or 413 naming a context limit) triggers the same compaction reactively from the current state. A rejected checkpoint request falls back to the last state that passed a threshold check - by definition a state with a full reserve of room - and an empty or tool-calling reply is resampled; after `max_compaction_attempts` failed attempts the run ends cleanly with what the conversation holds. An overflow with no history beyond the task propagates: the task alone approaches the window and there is nothing to reclaim. Summary and rollup calls are side requests: they spend tokens but are not work turns, and each carries a `compaction_attempt` semantic edge from the request that triggered the compaction, with the single `compaction` edge sourced from the branch summary.
 
 The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved. The model is told to mention important variable names in its summary so the resumed branch knows what is available. The same policy applies to the main agent and all recursive agents.
+
+### The ledger
 
 A session creates a fresh ledger and refuses to reopen an existing `messages.jsonl` for writing. Existing histories remain readable. The session owns active messages and their indices; the engine uses context snapshots. A ledger write or flush failure makes the writer unusable and prevents further prompts. Rollback restores in-memory context and counters even if its ledger write fails. Supervisor crash recovery is not supported.
 
@@ -201,8 +286,6 @@ earlier = h.windows[0].messages       # Initial working context
 child_history = history(session_dir="/path/to/child-session")
 message = child_history.windows[4].messages[2]  # If that child has reached window 4
 blocks = h.blocks                     # Compaction blocks with the ranges they cover
-a, b = blocks[0]["messages"]
-originals = h.messages[a : b + 1]      # What the first block summarizes
 ```
 
 Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.
@@ -642,3 +725,8 @@ stops with a failure event when the inbox event limit is reached. There are no
 model-authored callbacks, event selectors, or output predicates.
 
 Activity subscriptions become `completed` after their target permanently terminates, flushing pending activity and releasing their active slot. Watches of idle persistent agents remain active. Watching an already-finished target returns a completed subscription.
+
+## Acknowledgements
+
+- [headlong](https://github.com/laude-institute/headlong) (Laude Institute) for the tiered memory design that the compaction staircase, rollups, and verbatim tail follow: `design/tiered_memory.md` and `bin/recap --context`.
+- [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) (Prime Intellect) for the continual harness: the prompt/memory/skill/subagent entries, layered stores, refinement passes, and the skill contract that nano-rlm's harness adopts.
