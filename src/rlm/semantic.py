@@ -49,6 +49,7 @@ class _Request:
     inbound_edges: list[_PendingEdge]
     compaction_id: str | None = None
     refinement_id: str | None = None
+    rollup: bool = False
 
 
 @dataclass
@@ -123,10 +124,16 @@ class SemanticEdgeTracker:
         *,
         compaction_id: str | None = None,
         refinement_id: str | None = None,
+        rollup: bool = False,
     ) -> str:
+        """Start a request. A rollup is a compaction side request that merges earlier
+        summaries: it carries the compaction's attempt edge but never becomes the
+        summary request whose output seeds the next window."""
         session = self._sessions[session_id]
         if compaction_id is not None and refinement_id is not None:
             raise ValueError("a request belongs to one side operation")
+        if rollup and compaction_id is None:
+            raise ValueError("a rollup request belongs to a compaction")
         if refinement_id is not None:
             refinement = self._refinements[refinement_id]
             if refinement.session_id != session_id:
@@ -142,7 +149,7 @@ class SemanticEdgeTracker:
             compaction = self._compactions[compaction_id]
             if compaction.session_id != session_id:
                 raise ValueError("compaction does not belong to session")
-            if compaction.summary_request_id is not None:
+            if compaction.summary_request_id is not None and not rollup:
                 raise ValueError("compaction already has a summary request")
             inbound = []
             if compaction.source_request_id is not None:
@@ -169,9 +176,13 @@ class SemanticEdgeTracker:
 
         request_id = uuid.uuid4().hex
         self._requests[request_id] = _Request(
-            session_id, list(dict.fromkeys(inbound)), compaction_id, refinement_id
+            session_id,
+            list(dict.fromkeys(inbound)),
+            compaction_id,
+            refinement_id,
+            rollup,
         )
-        if compaction_id is not None:
+        if compaction_id is not None and not rollup:
             compaction.summary_request_id = request_id
         if refinement_id is not None:
             refinement.plan_request_id = request_id

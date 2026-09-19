@@ -155,6 +155,7 @@ class _Engine:
                 "summarize_at_tokens": None,
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
+                "compaction_fanout": 5,
                 "allow_git": False,
                 "harness_enabled": True,
                 "harness_global": False,

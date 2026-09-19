@@ -6,6 +6,9 @@ from typing import Any
 from openai import APIError, APIStatusError, AsyncOpenAI
 
 CHECKPOINT_PROMPT = """Create a concise continuation summary for the current task.
+Summarize only the work since the most recent compaction block: everything after the last
+`<runtime_event kind="compaction">` message, or the whole conversation when there is none.
+Earlier history is already preserved above at decreasing resolution and must not be restated.
 Preserve what is needed to resume accurately:
 - The user's objective, exact requirements, constraints, and unresolved decisions.
 - Completed work, evidence/results, important paths or sources, and remaining next steps.
@@ -21,6 +24,14 @@ If resources are no longer needed, note that they can be cancelled; do not imply
 
 Summarize from the existing conversation. Do not call tools. Reply with the summary as plain text."""
 
+ROLLUP_PROMPT = """The blocks below are consecutive summaries of your earlier work in this session,
+oldest first. Merge them into one summary about the length of a single block, in chronological
+order. Keep concrete outcomes, decisions, file paths, resource names and IDs, commands, evidence,
+and open items; drop narration and restated context. Do not call tools. Reply with the merged
+summary as plain text.
+
+"""
+
 REPL_NOTE = (
     "\n\nCompaction itself preserves the IPython kernel and supervisor-owned resources. "
     "Record useful Python variable names and what they contain, but account for any recovery "
@@ -30,13 +41,27 @@ REPL_NOTE = (
     "state before deciding whether to repeat work or wait."
 )
 
-SUMMARY_FRAMING = (
-    "The earlier conversation was compacted. The summary below preserves task progress, "
-    "constraints, and references for continuing. Compaction does not finish or restart "
-    "background work. Treat resource statuses as last-observed: refresh metadata and inbox "
-    "state with the available tools. Consult original history for exact instructions or "
-    "missing evidence, and do not duplicate work merely because its full conversation is absent."
+STAIRCASE_FRAMING = (
+    "The earlier conversation was compacted. The blocks below preserve it oldest first at "
+    "decreasing resolution: each header names the ledger messages, context windows, and turns "
+    "the block covers, and a higher-tier block merges several earlier summaries. Compaction "
+    "does not finish or restart background work. Treat resource statuses as last-observed: "
+    "refresh metadata and inbox state with the available tools. Consult original history for "
+    "exact instructions or missing evidence, and do not duplicate work merely because its full "
+    "conversation is absent."
 )
+
+
+def drilldown_note(ledger_path: str) -> str:
+    return (
+        f"Full conversation history is available in {ledger_path}. "
+        "Use `from rlm import history; h = await history()` to inspect `h.messages[a:b + 1]` "
+        "(the messages a block covers), `h.windows[w].messages`, `h.blocks` (every block "
+        "record), or `h.user_messages()`. Search or read relevant records with Python when a "
+        "block lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
+        "identifies the user record whose attempt was rolled back."
+    )
+
 
 RESERVE_TOKENS = 16_384
 """Compact when this many tokens remain below the model context window."""

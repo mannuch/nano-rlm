@@ -114,6 +114,10 @@ class ExecutionPolicy(_ConfigModel):
     still bounds the session."""
     max_compaction_attempts: int = Field(default=5, gt=0)
     """Summary-generation attempts within one compaction cycle."""
+    compaction_fanout: int = Field(default=5, ge=2)
+    """Blocks per rollup in the compaction staircase: each compaction adds a tier-1 block
+    (the branch summary) and every ``fanout`` consecutive blocks of one tier merge into
+    one block of the next, so tier k covers fanout^(k-1) branches."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``

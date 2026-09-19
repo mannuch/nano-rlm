@@ -41,6 +41,11 @@ class Session:
     def context_indices(self) -> tuple[int, ...]:
         return tuple(index for index, _ in self._context)
 
+    @property
+    def window(self) -> int:
+        """Index of the active context window."""
+        return self._window
+
     def check_writable(self) -> None:
         if self._write_error is not None:
             raise OSError(
