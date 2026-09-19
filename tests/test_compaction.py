@@ -696,6 +696,60 @@ async def test_failed_rollup_keeps_finer_blocks(session):
     assert ledger.events[-1]["type"] != "rollup"
 
 
+async def test_rollup_calls_share_one_budget_per_compaction(session):
+    refused = _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})]))
+    client = _ScriptedClient(
+        [
+            _work(),
+            _response(DummyMessage(content="branch one")),
+            _work(),
+            _response(DummyMessage(content="branch two")),
+            refused,
+            refused,
+            _work(),
+            _response(DummyMessage(content="branch three")),
+            refused,
+            refused,
+            _work(),
+            _response(DummyMessage(content="branch four")),
+            _response(DummyMessage(content="branches three and four")),
+            refused,
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(
+            summarize_at_tokens=100, compaction_fanout=2, max_compaction_attempts=2
+        ),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 4
+    # The fresh range is rolled up before the one that keeps failing, and the
+    # second call of the budget goes to the retry.
+    assert [block.key for block in engine._staircase.segments()] == [
+        (1, 0, 1),
+        (1, 1, 2),
+        (2, 2, 4),
+    ]
+    assert engine._staircase.unsealed() == [(2, 0, 2)]
+    rollup_calls = [
+        call
+        for call in client.calls
+        if call["messages"][-1]["content"].startswith(ROLLUP_PROMPT)
+    ]
+    assert len(rollup_calls) == 6
+    ledger = await history(session.dir)
+    compactions = [e for e in ledger.events if e["type"] == "compaction"]
+    assert [c["rollups_sealed"] for c in compactions] == [[], [], [], [[2, 2, 4]]]
+
+
 async def test_rollback_restores_staircase(session):
     client = _ScriptedClient(
         [

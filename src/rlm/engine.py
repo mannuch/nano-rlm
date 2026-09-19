@@ -1404,15 +1404,21 @@ class RLMEngine:
         """Roll up every tier the staircase can seal, finest first, and return the
         sealed ``[tier, start, end]`` ranges.
 
-        A rollup that yields no usable reply is skipped: the staircase shows its
-        children instead and the next compaction retries it.
+        One compaction spends at most ``max_compaction_attempts`` rollup calls in
+        total: the usual cycle needs none or one, so the budget only binds when
+        earlier rollups keep failing. A rollup that yields no usable reply, or does
+        not fit the budget, is skipped: the staircase shows its children instead and
+        the next compaction retries it.
         """
         sealed: list[list[int]] = []
         skipped: set[tuple[int, int, int]] = set()
+        calls_left = self.max_compaction_attempts
         while pending := [
             key for key in self._staircase.unsealed() if key not in skipped
         ]:
             for key in pending:
+                if calls_left == 0:
+                    return sealed
                 tier, start, end = key
                 children = self._staircase.children(tier, start, end)
                 request = [
@@ -1426,7 +1432,8 @@ class RLMEngine:
                     },
                 ]
                 text = ""
-                for _ in range(self.max_compaction_attempts):
+                while calls_left > 0:
+                    calls_left -= 1
                     try:
                         response, usage = await self._call_model(
                             request,

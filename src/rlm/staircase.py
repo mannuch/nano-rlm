@@ -86,12 +86,13 @@ class Staircase:
 
     def unsealed(self) -> list[tuple[int, int, int]]:
         """Aligned ranges whose children all exist but which have no block yet,
-        finest tier first."""
+        finest tier first and newest first within a tier, so a range that keeps
+        failing to roll up does not starve fresh ones."""
         ranges = []
         tier, size = 2, self.fanout
         while size <= self.branch_count:
             child = size // self.fanout
-            for start in range(0, self.branch_count - size + 1, size):
+            for start in reversed(range(0, self.branch_count - size + 1, size)):
                 key = (tier, start, start + size)
                 if key in self.blocks:
                     continue
