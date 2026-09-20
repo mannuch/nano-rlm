@@ -303,11 +303,11 @@ from rlm import history
 
 h = await history()
 h.blocks                                     # [{"tier": 1, "branches": [0, 1], "messages": [1, 1], ...}, ...]
-a, b = h.blocks[-1]["messages"]
-h.messages[a : b + 1]                        # what the newest block summarizes
+h.expand(-1)                                 # the messages the newest block summarizes
+h.expand(h.blocks[0])                        # a block record works too
 ```
 
-`h.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
+`h.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts; `h.expand` returns the slice of `h.messages` a block covers, which for a rolled-up block is everything its children covered. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
 
 ### Budgets and failure
 
@@ -339,6 +339,7 @@ earlier = h.windows[0].messages       # Initial working context
 child_history = history(session_dir="/path/to/child-session")
 message = child_history.windows[4].messages[2]  # If that child has reached window 4
 blocks = h.blocks                     # Compaction blocks with the ranges they cover
+originals = h.expand(blocks[0])       # The messages the first block summarizes
 ```
 
 Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.

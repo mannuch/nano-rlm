@@ -658,6 +658,12 @@ async def test_staircase_rolls_up_branch_summaries(session):
     assert rollup["messages"] == [first["messages"][0], second["messages"][1]]
     assert rollup["windows"] == [0, 1]
     assert rollup["summary"] == "branches one and two"
+    assert (
+        ledger.expand(rollup)
+        == ledger.messages[first["messages"][0] : second["messages"][1] + 1]
+    )
+    assert ledger.expand(0) == ledger.expand(first)
+    assert ledger.expand(-1)[0] == ledger.messages[third["messages"][0]]
     for block in blocks:
         assert block["request_id"]
     rollup_record = next(e for e in ledger.events if e["type"] == "rollup")

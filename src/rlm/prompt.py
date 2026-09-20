@@ -306,8 +306,8 @@ explicit session; use `await child.history()` when available. Reload for fresh s
 
 Compaction and rollback start new windows; earlier records remain addressable. Each
 compaction block names the message, window, and turn ranges it summarizes; `h.blocks`
-lists every block. Full tool outputs and shortened context versions have separate
-indices. `h.events` contains spawn and rollback records; prompt_rollback.prompt_id
+lists every block and `h.expand(i)` returns the messages block `i` summarizes. Full
+tool outputs and shortened context versions have separate indices. `h.events` contains spawn and rollback records; prompt_rollback.prompt_id
 identifies a rolled-back user attempt.
 History records what happened, not proof that side effects were undone. Recover exact
 instructions and evidence by searching/selectively printing records, not the entire ledger.

@@ -87,6 +87,14 @@ class History:
                 blocks = [item for item in blocks if item[0] < attempt]
         return [block for _, block in blocks]
 
+    def expand(self, block: dict | int) -> list[dict]:
+        """The ledger messages a compaction block summarizes: pass a record from
+        ``blocks`` or its position in that list."""
+        if isinstance(block, int):
+            block = self.blocks[block]
+        first, last = block["messages"]
+        return self.messages[first : last + 1]
+
     def user_messages(self) -> list[dict]:
         """Original user inputs, including attempts identified by rollback events."""
         return [
