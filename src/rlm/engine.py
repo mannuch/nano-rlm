@@ -308,7 +308,8 @@ class RLMEngine:
         self._refinement_count = 0
         self._turns_since_refine_review = 0
         self._last_refine_review_at: float | None = None
-        self._compact_refine_pending = False
+        # Blocks the latest compaction produced, pending an auto-refine review.
+        self._compact_refine_blocks: list[Block] | None = None
 
         # Metrics
         self._metrics = RLMMetrics()
@@ -1343,7 +1344,7 @@ class RLMEngine:
                 request_id=self._last_request_id,
             )
             self._staircase.add_branch(block)
-            sealed = await self._seal_rollups(compaction)
+            rollups = await self._seal_rollups(compaction)
         except BaseException as exc:
             self._semantic_edges.finish_compaction(
                 compaction.compaction_id,
@@ -1391,7 +1392,7 @@ class RLMEngine:
                 "turn": turn,
                 "summary": summary_text,
                 "block": block.to_record(),
-                "rollups_sealed": sealed,
+                "rollups_sealed": [list(rollup.key) for rollup in rollups],
                 "tail_message_indices": list(indices[tail_start:]),
                 "provenance": provenance,
                 "window": window,
@@ -1422,7 +1423,7 @@ class RLMEngine:
         )
         self._branch_first_window = window
         self._metrics.turns_since_last_compaction = 0
-        self._compact_refine_pending = True
+        self._compact_refine_blocks = [block, *rollups]
 
     def _pinned_for_window(
         self, tail_indices: Sequence[int]
@@ -1473,9 +1474,9 @@ class RLMEngine:
             f"no usable summary after {self.max_compaction_attempts} attempts"
         )
 
-    async def _seal_rollups(self, compaction: Compaction) -> list[list[int]]:
+    async def _seal_rollups(self, compaction: Compaction) -> list[Block]:
         """Roll up every tier the staircase can seal, finest first, and return the
-        sealed ``[tier, start, end]`` ranges.
+        sealed blocks.
 
         One compaction spends at most ``max_compaction_attempts`` rollup calls in
         total: the usual cycle needs none or one, so the budget only binds when
@@ -1483,7 +1484,7 @@ class RLMEngine:
         not fit the budget, is skipped: the staircase shows its children instead and
         the next compaction retries it.
         """
-        sealed: list[list[int]] = []
+        sealed: list[Block] = []
         skipped: set[tuple[int, int, int]] = set()
         calls_left = self.max_compaction_attempts
         while pending := [
@@ -1549,7 +1550,7 @@ class RLMEngine:
                         },
                     }
                 )
-                sealed.append([tier, start, end])
+                sealed.append(block)
         return sealed
 
     def execution_snapshot(self) -> dict:
@@ -1639,7 +1640,8 @@ class RLMEngine:
             and self._refinement_count >= config.max_refinements
         ):
             return
-        reason = "compact" if self._compact_refine_pending else "turn_interval"
+        blocks = self._compact_refine_blocks
+        reason = "compact" if blocks else "turn_interval"
         if reason == "turn_interval" and (
             self._turns_since_refine_review < config.refine_turn_interval
         ):
@@ -1650,7 +1652,7 @@ class RLMEngine:
             and now - self._last_refine_review_at < config.refine_cooldown_seconds
         ):
             return
-        self._compact_refine_pending = False
+        self._compact_refine_blocks = None
         turns = self._turns_since_refine_review
         self._turns_since_refine_review = 0
         self._last_refine_review_at = now
@@ -1661,6 +1663,7 @@ class RLMEngine:
             load_history(self._harness.local),
             trigger=reason,
             turns_since_review=turns,
+            blocks=blocks,
         )
         try:
             response, _ = await self._call_model(
@@ -1693,6 +1696,7 @@ class RLMEngine:
                 "should_refine": should_refine,
                 "rationale": rationale,
                 "request_id": self._last_request_id,
+                "blocks": [list(block.key) for block in blocks or []],
             }
         )
         if not should_refine:
@@ -1700,7 +1704,10 @@ class RLMEngine:
             return
         self._semantic_edges.release_refinement_request(refinement.refinement_id)
         await self._refine(
-            trigger=f"auto:{reason}", instructions=instructions, refinement=refinement
+            trigger=f"auto:{reason}",
+            instructions=instructions,
+            refinement=refinement,
+            evidence=blocks,
         )
 
     async def _refine(
@@ -1711,10 +1718,12 @@ class RLMEngine:
         global_: bool = False,
         rollback_id: str | None = None,
         refinement=None,
+        evidence: list[Block] | None = None,
     ) -> RefinementResult | None:
         """One refinement pass: plan (or build a rollback), apply, rebuild the system
         prompt, and tell the model what changed. A pass that produces no usable
-        proposal is reported in the conversation and never ends the run.
+        proposal is reported in the conversation and never ends the run. ``evidence``
+        is the compaction blocks an automatic review approved on, shown to the planner.
         """
         view = self._harness
         if view is None:
@@ -1754,6 +1763,7 @@ class RLMEngine:
                     scope=store.scope,
                     instructions=instructions,
                     importable_names=sorted(importable),
+                    evidence=evidence,
                 )
                 proposal = None
                 base = self.session.messages

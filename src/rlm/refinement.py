@@ -25,8 +25,10 @@ from rlm.harness import (
     HarnessStore,
     HarnessView,
     RefinementEvent,
+    compact,
     slug,
 )
+from rlm.staircase import Block
 
 RefinementAction = Literal["create", "update", "delete"]
 
@@ -99,13 +101,21 @@ GLOBAL_SCOPE_POLICY = (
 
 REVIEW_PROMPT = """Decide whether this checkpoint should run a continual-harness refinement (trigger:
 %(trigger)s; %(turns)d work turns since the last review). A refinement writes local
-harness state by default: approve when the conversation since the last review contains
-evidence useful to this session's future turns (a repeated failure, a reusable tactic, a
-repeated delegation role, a durable fact or preference, a user correction). Reject one-off
-noise, unsupported hypotheses and transient tool output. Do not call tools. Reply with JSON
-only:
+harness state by default: approve when the conversation and any compaction blocks since
+the last review contain evidence useful to this session's future turns (a repeated
+failure, a reusable tactic, a repeated delegation role, a durable fact or preference, a
+user correction). Reject one-off noise, unsupported hypotheses and transient tool output.
+Do not call tools. Reply with JSON only:
 
 {"should_refine": true|false, "rationale": "short reason", "instructions": "optional focus for the refinement"}"""
+
+BLOCKS_NOTE = (
+    "A compaction just closed a branch. These are the blocks it produced; the staircase "
+    "above holds the rest. A tier-2 or higher block merges several branches: a failure, "
+    "tactic, preference or fact that recurs across blocks is evidence for a durable "
+    "entry; a single branch's progress is not."
+)
+BLOCK_SUMMARY_CHARS = 600
 
 HISTORY_LIMIT = 5
 _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
@@ -193,6 +203,16 @@ class RefinementResult:
 # --- prompts ---------------------------------------------------------------
 
 
+def blocks_section(tag: str, blocks: list[Block]) -> str:
+    """Compaction blocks as inline text: side calls run with ``tool_choice="none"``,
+    so the block summaries themselves are the evidence, never a pointer to follow."""
+    rendered = "\n\n".join(
+        f"{block.header()}\n{compact(block.summary, BLOCK_SUMMARY_CHARS)}"
+        for block in blocks
+    )
+    return f"<{tag}>\n{BLOCKS_NOTE}\n\n{rendered}\n</{tag}>"
+
+
 def refine_prompt(
     view: HarnessView,
     history: list[RefinementResult],
@@ -200,6 +220,7 @@ def refine_prompt(
     scope: HarnessScope,
     instructions: str | None,
     importable_names: list[str],
+    evidence: list[Block] | None = None,
 ) -> str:
     """The user message appended to the live conversation for a planning call."""
     parts = [
@@ -213,6 +234,8 @@ def refine_prompt(
         f"<current_harness_state>\n{view.overview(max_entries_per_kind=40, max_content_chars=240)}\n</current_harness_state>",
         f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
     ]
+    if evidence:
+        parts.append(blocks_section("evidence", evidence))
     if instructions:
         parts.append(f"<refine_instructions>\n{instructions}\n</refine_instructions>")
     return "\n\n".join(parts)
@@ -224,14 +247,16 @@ def review_prompt(
     *,
     trigger: str,
     turns_since_review: int,
+    blocks: list[Block] | None = None,
 ) -> str:
-    return "\n\n".join(
-        [
-            REVIEW_PROMPT % {"trigger": trigger, "turns": turns_since_review},
-            f"<current_harness_state>\n{view.overview(max_entries_per_kind=20)}\n</current_harness_state>",
-            f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
-        ]
-    )
+    parts = [
+        REVIEW_PROMPT % {"trigger": trigger, "turns": turns_since_review},
+        f"<current_harness_state>\n{view.overview(max_entries_per_kind=20)}\n</current_harness_state>",
+        f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
+    ]
+    if blocks:
+        parts.append(blocks_section("compaction_blocks", blocks))
+    return "\n\n".join(parts)
 
 
 def history_for_prompt(
