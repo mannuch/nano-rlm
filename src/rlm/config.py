@@ -121,7 +121,11 @@ class ExecutionPolicy(_ConfigModel):
     compaction_tail_tokens: int = Field(default=12_000, ge=0)
     """Estimated tokens of the most recent messages kept verbatim after the staircase
     when a window is compacted, capped at a quarter of the compaction threshold. 0
-    keeps none: the compacted window is the system prompt and the staircase alone."""
+    keeps none: the compacted window ends with the staircase."""
+    compaction_prompt_tokens: int = Field(default=4_000, ge=0)
+    """Estimated-token cap for keeping the current prompt verbatim in a compacted
+    window, ahead of the staircase. A larger prompt is referenced by ledger index in
+    the staircase message instead; 0 never keeps it."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``

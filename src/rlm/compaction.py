@@ -52,6 +52,16 @@ STAIRCASE_FRAMING = (
 )
 
 
+PINNED_PROMPT_NOTE = "The current request precedes this message verbatim."
+
+
+def prompt_pointer_note(index: int) -> str:
+    return (
+        f"The current request is message {index} of the ledger, too large to keep in "
+        f"context verbatim: read it with `h.messages[{index}]`."
+    )
+
+
 def drilldown_note(ledger_path: str) -> str:
     return (
         f"Full conversation history is available in {ledger_path}. "

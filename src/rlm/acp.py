@@ -110,6 +110,7 @@ class _LimitsSnapshot(_ContractModel):
     max_compaction_attempts: int = Field(gt=0)
     compaction_fanout: int = Field(ge=2)
     compaction_tail_tokens: int = Field(ge=0)
+    compaction_prompt_tokens: int = Field(ge=0)
     allow_git: bool
     harness_enabled: bool
     harness_global: bool

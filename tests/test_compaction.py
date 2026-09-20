@@ -18,10 +18,12 @@ from conftest import (
     DummyUsage,
 )
 from rlm.compaction import (
+    PINNED_PROMPT_NOTE,
     ROLLUP_PROMPT,
     STAIRCASE_FRAMING,
     CompactionFailed,
     is_context_overflow,
+    prompt_pointer_note,
 )
 from rlm.config import (
     ExecutionPolicy,
@@ -126,6 +128,7 @@ def _config(
     max_compaction_attempts: int = 5,
     compaction_fanout: int = 5,
     compaction_tail_tokens: int = 12_000,
+    compaction_prompt_tokens: int = 4_000,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -139,6 +142,7 @@ def _config(
             max_compaction_attempts=max_compaction_attempts,
             compaction_fanout=compaction_fanout,
             compaction_tail_tokens=compaction_tail_tokens,
+            compaction_prompt_tokens=compaction_prompt_tokens,
         ),
     )
 
@@ -363,11 +367,13 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert engine._metrics.num_compactions == 1
     assert client.calls[3]["tool_choice"] == "none"
     retry_messages = client.calls[4]["messages"]
-    assert len(retry_messages) == 2
-    assert retry_messages[1]["content"].startswith(
+    assert len(retry_messages) == 3
+    # The task prompt is re-attached ahead of the staircase, keeping its index.
+    assert retry_messages[1] == client.calls[1]["messages"][1]
+    assert retry_messages[2]["content"].startswith(
         '<runtime_event kind="compaction">\n' + STAIRCASE_FRAMING
     )
-    assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
+    assert str(session.dir / "messages.jsonl") in retry_messages[2]["content"]
     records = [
         json.loads(line)
         for line in (session.dir / "messages.jsonl").read_text().splitlines()
@@ -392,9 +398,14 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert not any(entry["type"].startswith("checkpoint_") for entry in records)
     ledger = await history(session.dir)
     assert ledger.windows[0].messages == client.calls[1]["messages"]
-    assert ledger.windows[1].messages[:2] == retry_messages
+    assert ledger.windows[1].messages[:3] == retry_messages
     assert ledger.windows[1].messages == session.messages
-    assert ledger.windows[0].message_indices[0] == ledger.windows[1].message_indices[0]
+    assert (
+        ledger.windows[1].message_indices[:2] == ledger.windows[0].message_indices[:2]
+    )
+    compaction = next(entry for entry in records if entry["type"] == "compaction")
+    assert compaction["pinned_prompt_index"] == 1
+    assert compaction["summary_message_index"] == ledger.windows[1].message_indices[2]
 
 
 async def test_overflow_recovers_without_discovered_threshold(session):
@@ -615,7 +626,7 @@ async def test_staircase_rolls_up_branch_summaries(session):
     assert "[tier 1 | branch 0" in rollup_call["messages"][1]["content"]
     assert "branch two" in rollup_call["messages"][1]["content"]
 
-    staircase = session.messages[1]["content"]
+    staircase = session.messages[2]["content"]
     assert staircase.startswith(
         '<runtime_event kind="compaction">\n' + STAIRCASE_FRAMING
     )
@@ -691,7 +702,7 @@ async def test_failed_rollup_keeps_finer_blocks(session):
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 2
-    staircase = session.messages[1]["content"]
+    staircase = session.messages[2]["content"]
     assert staircase.index("[tier 1 | branch 0") < staircase.index("[tier 1 | branch 1")
     assert "branch one" in staircase and "branch two" in staircase
     assert engine._staircase.unsealed() == [(2, 0, 2)]
@@ -777,15 +788,19 @@ async def test_rollback_restores_staircase(session):
         await engine.prompt("task")
         assert engine._staircase.branch_count == 1
         branch_start = (engine._branch_first_index, engine._branch_first_window)
+        pinned = engine._pinned_prompt
+        assert pinned is not None and pinned[1]["content"] == "task"
         with pytest.raises(RuntimeError, match="boom"):
             await engine.prompt("more")
         assert engine._staircase.branch_count == 1
         assert (engine._branch_first_index, engine._branch_first_window) == branch_start
+        assert engine._pinned_prompt == pinned
         result = await engine.prompt("more again")
     finally:
         await engine.aclose()
 
     assert result.answer == "done again"
+    assert engine._pinned_prompt[1]["content"] == "more again"
     blocks = [block.key for block in engine._staircase.segments()]
     assert blocks == [(1, 0, 1), (1, 1, 2)]
     assert engine._staircase.blocks[(1, 1, 2)].summary == "branch two again"
@@ -851,29 +866,74 @@ async def test_compaction_keeps_recent_messages_verbatim(session, tail_tokens):
     # 6 result, 7 staircase.
     assert seeds[0] == []
     if tail_tokens:
-        # The assistant call and its result keep their indices in the new window.
-        assert seeds[1] == [0, 4, 2, 3]
-        assert [m["role"] for m in ledger.windows[1].messages[:4]] == [
+        # The task prompt, the assistant call and its result keep their indices in
+        # the new window.
+        assert seeds[1] == [0, 1, 4, 2, 3]
+        assert [m["role"] for m in ledger.windows[1].messages[:5]] == [
             "system",
+            "user",
             "user",
             "assistant",
             "tool",
         ]
+        assert ledger.windows[1].messages[1] == ledger.windows[0].messages[1]
         assert compactions[0]["tail_message_indices"] == [2, 3]
-        assert compactions[0]["dropped_chars"] == len("task")
+        # The pinned prompt and the tail both stay, so nothing was dropped.
+        assert compactions[0]["dropped_chars"] == 0
         assert first["messages"] == [1, 1]
         assert second["messages"] == [2, 4]
-        assert seeds[2] == [0, 7, 5, 6]
+        assert seeds[2] == [0, 1, 7, 5, 6]
         assert (
             "remain in context verbatim" in client.calls[1]["messages"][-1]["content"]
         )
+        assert "do not restate it" in client.calls[1]["messages"][-1]["content"]
     else:
-        assert seeds[1] == [0, 4]
+        assert seeds[1] == [0, 1, 4]
         assert compactions[0]["tail_message_indices"] == []
         assert first["messages"] == [1, 3]
         assert second["messages"] == [5, 6]
-        assert seeds[2] == [0, 7]
+        assert seeds[2] == [0, 1, 7]
         assert (
             "remain in context verbatim"
             not in client.calls[1]["messages"][-1]["content"]
         )
+
+
+async def test_oversized_prompt_is_referenced_instead_of_pinned(session):
+    client = _ScriptedClient(
+        [
+            _work(prompt_tokens=50_000),
+            _response(DummyMessage(content="branch one")),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(
+            summarize_at_tokens=40_000,
+            compaction_tail_tokens=0,
+            compaction_prompt_tokens=8,
+        ),
+    )
+    try:
+        result = await engine.run("a task far longer than eight tokens allow to pin")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    ledger = await history(session.dir)
+    seeds = [
+        e["message_indices"] for e in ledger.events if e["type"] == "context_window"
+    ]
+    assert seeds[1] == [0, 4]
+    staircase = ledger.windows[1].messages[1]["content"]
+    assert prompt_pointer_note(1) in staircase
+    assert PINNED_PROMPT_NOTE not in staircase
+    compaction = next(e for e in ledger.events if e["type"] == "compaction")
+    assert compaction["pinned_prompt_index"] is None
+    # The prompt left the window along with the call and its result.
+    assert compaction["dropped_chars"] > len(
+        "a task far longer than eight tokens allow to pin"
+    )
+    assert "do not restate it" not in client.calls[1]["messages"][-1]["content"]
