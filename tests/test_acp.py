@@ -156,6 +156,7 @@ class _Engine:
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "compaction_fanout": 5,
+                "compaction_tail_tokens": 12000,
                 "allow_git": False,
                 "harness_enabled": True,
                 "harness_global": False,
@@ -458,13 +459,18 @@ async def test_depth_limit_is_a_completed_result(session):
 async def test_compaction_counts_seed_prompt(session):
     client = DummyClient([DummyMessage(content="summary")])
     engine = RLMEngine(
-        client=client, session=session, runtime_config=make_runtime_config()
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            policy=ExecutionPolicy(compaction_tail_tokens=0)
+        ),
     )  # type: ignore[arg-type]
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "original prompt"},
         {"role": "assistant", "content": "work"},
     ]
+    session.replace_context(messages, reason="start")
 
     try:
         await engine._compact_branch(messages, turn=0)

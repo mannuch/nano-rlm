@@ -11,7 +11,11 @@ truth and every block is a pointer into it.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+from rlm.compaction import estimated_tokens
 
 
 @dataclass(frozen=True)
@@ -147,3 +151,25 @@ class Staircase:
         return "\n\n".join(
             f"{block.header()}\n{block.summary}" for block in self.segments()
         )
+
+
+def select_tail(
+    messages: list[dict], indices: Sequence[int], first_index: int, budget: int
+) -> int:
+    """The position in ``messages`` where the verbatim tail of a compacted window
+    starts; ``len(messages)`` when nothing is kept.
+
+    The tail holds the most recent messages that fit ``budget`` estimated tokens,
+    never reaches the branch's first message (index ``first_index``), and opens with
+    an assistant or user message so a tool result is never orphaned from its call.
+    """
+    start = len(messages)
+    spent = 0
+    while start > 0 and indices[start - 1] > first_index:
+        spent += estimated_tokens(json.dumps(messages[start - 1]))
+        if spent > budget:
+            break
+        start -= 1
+    while start < len(messages) and messages[start].get("role") == "tool":
+        start += 1
+    return start

@@ -32,7 +32,7 @@ from rlm.config import (
 from rlm.engine import RLMEngine
 from rlm.history import history
 from rlm.session import Session
-from rlm.staircase import Block, Staircase
+from rlm.staircase import Block, Staircase, select_tail
 from rlm.supervisor import SessionTreeSupervisor
 
 
@@ -125,6 +125,7 @@ def _config(
     compaction: bool = True,
     max_compaction_attempts: int = 5,
     compaction_fanout: int = 5,
+    compaction_tail_tokens: int = 12_000,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -137,6 +138,7 @@ def _config(
             summarize_at_tokens=summarize_at_tokens,
             max_compaction_attempts=max_compaction_attempts,
             compaction_fanout=compaction_fanout,
+            compaction_tail_tokens=compaction_tail_tokens,
         ),
     )
 
@@ -224,6 +226,7 @@ async def test_compaction_attempt_limit_is_configurable(session):
         {"role": "system", "content": "system"},
         {"role": "user", "content": "prompt"},
     ]
+    session.replace_context(messages, reason="start")
 
     try:
         with pytest.raises(CompactionFailed, match="after 2 attempts"):
@@ -253,7 +256,7 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(max_compaction_attempts=2),
+        runtime_config=_config(max_compaction_attempts=2, compaction_tail_tokens=0),
     )
     messages = [
         {"role": "system", "content": "system"},
@@ -299,6 +302,7 @@ async def test_compaction_retries_reasoning_without_final_content(session, conte
         {"role": "system", "content": "system"},
         {"role": "user", "content": "task"},
     ]
+    session.replace_context(messages, reason="start")
     try:
         await engine._compact_branch(messages, turn=0)
         assert "complete summary" in session.messages[1]["content"]
@@ -791,3 +795,85 @@ async def test_rollback_restores_staircase(session):
         (1, 1, 2, "branch two again"),
     ]
     assert sum(1 for e in ledger.events if e["type"] == "compaction") == 3
+
+
+def test_select_tail_fits_budget_and_opens_with_a_call():
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "a" * 40},
+        {"role": "tool", "content": "r" * 40},
+        {"role": "assistant", "content": "b" * 40},
+        {"role": "tool", "content": "q" * 40},
+    ]
+    indices = [0, 1, 2, 3, 4, 5]
+
+    assert select_tail(messages, indices, 1, 10_000) == 2
+    assert select_tail(messages, indices, 1, 40) == 4
+    assert select_tail(messages, indices, 1, 0) == 6
+    # The branch's first message is never part of the tail.
+    assert select_tail(messages, indices, 4, 10_000) == 6
+    assert select_tail(messages, indices, 3, 10_000) == 4
+
+
+@pytest.mark.parametrize("tail_tokens", [12_000, 0])
+async def test_compaction_keeps_recent_messages_verbatim(session, tail_tokens):
+    client = _ScriptedClient(
+        [
+            _work(prompt_tokens=50_000),
+            _response(DummyMessage(content="branch one")),
+            _work(prompt_tokens=50_000),
+            _response(DummyMessage(content="branch two")),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(
+            summarize_at_tokens=40_000, compaction_tail_tokens=tail_tokens
+        ),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 2
+    ledger = await history(session.dir)
+    seeds = [
+        e["message_indices"] for e in ledger.events if e["type"] == "context_window"
+    ]
+    compactions = [e for e in ledger.events if e["type"] == "compaction"]
+    first, second = ledger.blocks
+    # Ledger indices: 0 system, 1 task, 2 call, 3 result, 4 staircase, 5 call,
+    # 6 result, 7 staircase.
+    assert seeds[0] == []
+    if tail_tokens:
+        # The assistant call and its result keep their indices in the new window.
+        assert seeds[1] == [0, 4, 2, 3]
+        assert [m["role"] for m in ledger.windows[1].messages[:4]] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+        ]
+        assert compactions[0]["tail_message_indices"] == [2, 3]
+        assert compactions[0]["dropped_chars"] == len("task")
+        assert first["messages"] == [1, 1]
+        assert second["messages"] == [2, 4]
+        assert seeds[2] == [0, 7, 5, 6]
+        assert (
+            "remain in context verbatim" in client.calls[1]["messages"][-1]["content"]
+        )
+    else:
+        assert seeds[1] == [0, 4]
+        assert compactions[0]["tail_message_indices"] == []
+        assert first["messages"] == [1, 3]
+        assert second["messages"] == [5, 6]
+        assert seeds[2] == [0, 7]
+        assert (
+            "remain in context verbatim"
+            not in client.calls[1]["messages"][-1]["content"]
+        )

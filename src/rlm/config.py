@@ -118,6 +118,10 @@ class ExecutionPolicy(_ConfigModel):
     """Blocks per rollup in the compaction staircase: each compaction adds a tier-1 block
     (the branch summary) and every ``fanout`` consecutive blocks of one tier merge into
     one block of the next, so tier k covers fanout^(k-1) branches."""
+    compaction_tail_tokens: int = Field(default=12_000, ge=0)
+    """Estimated tokens of the most recent messages kept verbatim after the staircase
+    when a window is compacted, capped at a quarter of the compaction threshold. 0
+    keeps none: the compacted window is the system prompt and the staircase alone."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
