@@ -18,7 +18,8 @@ from conftest import (
     DummyUsage,
 )
 from rlm.compaction import (
-    SUMMARY_FRAMING,
+    ROLLUP_PROMPT,
+    STAIRCASE_FRAMING,
     CompactionFailed,
     is_context_overflow,
 )
@@ -31,6 +32,7 @@ from rlm.config import (
 from rlm.engine import RLMEngine
 from rlm.history import history
 from rlm.session import Session
+from rlm.staircase import Block, Staircase
 from rlm.supervisor import SessionTreeSupervisor
 
 
@@ -122,6 +124,7 @@ def _config(
     summarize_at_tokens: int | None = None,
     compaction: bool = True,
     max_compaction_attempts: int = 5,
+    compaction_fanout: int = 5,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -133,7 +136,75 @@ def _config(
             compaction=compaction,
             summarize_at_tokens=summarize_at_tokens,
             max_compaction_attempts=max_compaction_attempts,
+            compaction_fanout=compaction_fanout,
         ),
+    )
+
+
+def _block(tier: int, start: int, end: int) -> Block:
+    return Block(
+        tier=tier,
+        branches=(start, end),
+        messages=(start * 10, end * 10 - 1),
+        windows=(start, end - 1),
+        turns=(start * 4, end * 4 - 1),
+        summary=f"t{tier}:{start}-{end}",
+        request_id=f"req-{tier}-{start}",
+    )
+
+
+def test_staircase_layout_decomposes_branches_in_base_fanout():
+    staircase = Staircase(2)
+    layouts = []
+    for branch in range(9):
+        staircase.add_branch(_block(1, branch, branch + 1))
+        while pending := staircase.unsealed():
+            for tier, start, end in pending:
+                staircase.seal(_block(tier, start, end))
+        layouts.append([block.key for block in staircase.segments()])
+
+    assert layouts == [
+        [(1, 0, 1)],
+        [(2, 0, 2)],
+        [(2, 0, 2), (1, 2, 3)],
+        [(3, 0, 4)],
+        [(3, 0, 4), (1, 4, 5)],
+        [(3, 0, 4), (2, 4, 6)],
+        [(3, 0, 4), (2, 4, 6), (1, 6, 7)],
+        [(4, 0, 8)],
+        [(4, 0, 8), (1, 8, 9)],
+    ]
+    top = staircase.blocks[(4, 0, 8)]
+    assert staircase.children(4, 0, 8) == [
+        staircase.blocks[(3, 0, 4)],
+        staircase.blocks[(3, 4, 8)],
+    ]
+    assert top.header() == (
+        "[tier 4 | branches 0-7 | windows 0-7 | messages 0-79 | turns 0-31]"
+    )
+    assert staircase.blocks[(1, 8, 9)].header() == (
+        "[tier 1 | branch 8 | window 8 | messages 80-89 | turns 32-35]"
+    )
+
+
+def test_staircase_shows_children_of_a_missing_rollup():
+    staircase = Staircase(3)
+    for branch in range(4):
+        staircase.add_branch(_block(1, branch, branch + 1))
+
+    assert staircase.unsealed() == [(2, 0, 3)]
+    assert [block.key for block in staircase.segments()] == [
+        (1, 0, 1),
+        (1, 1, 2),
+        (1, 2, 3),
+        (1, 3, 4),
+    ]
+    staircase.seal(_block(2, 0, 3))
+    assert staircase.unsealed() == []
+    assert [block.key for block in staircase.segments()] == [(2, 0, 3), (1, 3, 4)]
+    assert staircase.render().startswith(
+        "[tier 2 | branches 0-2 | windows 0-2 | messages 0-29 | turns 0-11]\nt2:0-3\n\n"
+        "[tier 1 | branch 3"
     )
 
 
@@ -290,7 +361,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     retry_messages = client.calls[4]["messages"]
     assert len(retry_messages) == 2
     assert retry_messages[1]["content"].startswith(
-        '<runtime_event kind="compaction">\n' + SUMMARY_FRAMING
+        '<runtime_event kind="compaction">\n' + STAIRCASE_FRAMING
     )
     assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
     records = [
@@ -497,3 +568,226 @@ async def test_checkpoint_fallback_preserves_kernel_warning_without_large_output
         assert engine._metrics.num_compactions == 1
     finally:
         engine.close()
+
+
+def _work(prompt_tokens: int = 200) -> DummyResponse:
+    return _response(
+        DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "print(1)"})]),
+        prompt_tokens=prompt_tokens,
+    )
+
+
+async def test_staircase_rolls_up_branch_summaries(session):
+    client = _ScriptedClient(
+        [
+            _work(),
+            _response(DummyMessage(content="branch one")),
+            _work(),
+            _response(DummyMessage(content="branch two")),
+            _response(DummyMessage(content="branches one and two")),
+            _work(),
+            _response(DummyMessage(content="branch three")),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summarize_at_tokens=100, compaction_fanout=2),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 3
+    assert engine._own_turns == 4
+
+    rollup_call = client.calls[4]
+    assert rollup_call["tool_choice"] == "none"
+    assert rollup_call["messages"][0]["role"] == "system"
+    assert rollup_call["messages"][1]["content"].startswith(ROLLUP_PROMPT)
+    assert "[tier 1 | branch 0" in rollup_call["messages"][1]["content"]
+    assert "branch two" in rollup_call["messages"][1]["content"]
+
+    staircase = session.messages[1]["content"]
+    assert staircase.startswith(
+        '<runtime_event kind="compaction">\n' + STAIRCASE_FRAMING
+    )
+    assert staircase.index("[tier 2 | branches 0-1") < staircase.index(
+        "[tier 1 | branch 2"
+    )
+    assert "branches one and two" in staircase
+    assert "branch three" in staircase
+    assert "branch one\n" not in staircase
+    assert "h.blocks" in staircase
+
+    ledger = await history(session.dir)
+    blocks = ledger.blocks
+    # A rollup is sealed, and logged, before the compaction that triggered it.
+    assert [(b["tier"], *b["branches"]) for b in blocks] == [
+        (1, 0, 1),
+        (2, 0, 2),
+        (1, 1, 2),
+        (1, 2, 3),
+    ]
+    first, rollup, second, third = blocks
+    assert first["messages"][0] == 1
+    assert first["windows"] == [0, 0]
+    assert first["turns"] == [0, 0]
+    # The compaction message sits between consecutive branches.
+    assert second["messages"][0] == first["messages"][1] + 2
+    assert third["messages"][0] == second["messages"][1] + 2
+    assert third["turns"] == [2, 2]
+    assert rollup["messages"] == [first["messages"][0], second["messages"][1]]
+    assert rollup["windows"] == [0, 1]
+    assert rollup["summary"] == "branches one and two"
+    for block in blocks:
+        assert block["request_id"]
+    rollup_record = next(e for e in ledger.events if e["type"] == "rollup")
+    assert rollup_record["usage"] == {"prompt_tokens": 1, "completion_tokens": 1}
+    compactions = [e for e in ledger.events if e["type"] == "compaction"]
+    assert [c["rollups_sealed"] for c in compactions] == [[], [[2, 0, 2]], []]
+
+    edges = engine._semantic_edges.snapshot()["edges"]
+    compaction_edges = [e for e in edges if e["type"] == "compaction"]
+    assert len(compaction_edges) == 3
+    assert compaction_edges[1]["source_request_id"] == second["request_id"]
+    rollup_edges = [e for e in edges if e["target_request_id"] == rollup["request_id"]]
+    assert [e["type"] for e in rollup_edges] == ["compaction_attempt"]
+    assert (
+        rollup_edges[0]["source_request_id"] == compaction_edges[0]["target_request_id"]
+    )
+
+
+async def test_failed_rollup_keeps_finer_blocks(session):
+    client = _ScriptedClient(
+        [
+            _work(),
+            _response(DummyMessage(content="branch one")),
+            _work(),
+            _response(DummyMessage(content="branch two")),
+            _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})])),
+            _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})])),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(
+            summarize_at_tokens=100, compaction_fanout=2, max_compaction_attempts=2
+        ),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 2
+    staircase = session.messages[1]["content"]
+    assert staircase.index("[tier 1 | branch 0") < staircase.index("[tier 1 | branch 1")
+    assert "branch one" in staircase and "branch two" in staircase
+    assert engine._staircase.unsealed() == [(2, 0, 2)]
+    ledger = await history(session.dir)
+    assert [b["tier"] for b in ledger.blocks] == [1, 1]
+    assert ledger.events[-1]["type"] != "rollup"
+
+
+async def test_rollup_calls_share_one_budget_per_compaction(session):
+    refused = _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})]))
+    client = _ScriptedClient(
+        [
+            _work(),
+            _response(DummyMessage(content="branch one")),
+            _work(),
+            _response(DummyMessage(content="branch two")),
+            refused,
+            refused,
+            _work(),
+            _response(DummyMessage(content="branch three")),
+            refused,
+            refused,
+            _work(),
+            _response(DummyMessage(content="branch four")),
+            _response(DummyMessage(content="branches three and four")),
+            refused,
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(
+            summarize_at_tokens=100, compaction_fanout=2, max_compaction_attempts=2
+        ),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 4
+    # The fresh range is rolled up before the one that keeps failing, and the
+    # second call of the budget goes to the retry.
+    assert [block.key for block in engine._staircase.segments()] == [
+        (1, 0, 1),
+        (1, 1, 2),
+        (2, 2, 4),
+    ]
+    assert engine._staircase.unsealed() == [(2, 0, 2)]
+    rollup_calls = [
+        call
+        for call in client.calls
+        if call["messages"][-1]["content"].startswith(ROLLUP_PROMPT)
+    ]
+    assert len(rollup_calls) == 6
+    ledger = await history(session.dir)
+    compactions = [e for e in ledger.events if e["type"] == "compaction"]
+    assert [c["rollups_sealed"] for c in compactions] == [[], [], [], [[2, 2, 4]]]
+
+
+async def test_rollback_restores_staircase(session):
+    client = _ScriptedClient(
+        [
+            _work(),
+            _response(DummyMessage(content="branch one")),
+            _response(DummyMessage(content="done")),
+            _work(),
+            _response(DummyMessage(content="branch two")),
+            RuntimeError("boom"),
+            _work(),
+            _response(DummyMessage(content="branch two again")),
+            _response(DummyMessage(content="done again")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summarize_at_tokens=100, compaction_fanout=5),
+    )
+    try:
+        await engine.prompt("task")
+        assert engine._staircase.branch_count == 1
+        branch_start = (engine._branch_first_index, engine._branch_first_window)
+        with pytest.raises(RuntimeError, match="boom"):
+            await engine.prompt("more")
+        assert engine._staircase.branch_count == 1
+        assert (engine._branch_first_index, engine._branch_first_window) == branch_start
+        result = await engine.prompt("more again")
+    finally:
+        await engine.aclose()
+
+    assert result.answer == "done again"
+    blocks = [block.key for block in engine._staircase.segments()]
+    assert blocks == [(1, 0, 1), (1, 1, 2)]
+    assert engine._staircase.blocks[(1, 1, 2)].summary == "branch two again"
+    ledger = await history(session.dir)
+    assert [(b["tier"], *b["branches"], b["summary"]) for b in ledger.blocks] == [
+        (1, 0, 1, "branch one"),
+        (1, 1, 2, "branch two again"),
+    ]
+    assert sum(1 for e in ledger.events if e["type"] == "compaction") == 3

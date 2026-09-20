@@ -191,6 +191,45 @@ def test_compaction_consumes_restored_edges_but_preserves_late_returns():
     ]
 
 
+def test_rollup_requests_are_compaction_attempts_beside_the_summary():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    preceding_request = _finish(lineage, "root")
+    compaction = lineage.begin_compaction("root")
+    summary_request = lineage.start_request(
+        "root", compaction_id=compaction.compaction_id
+    )
+    lineage.finish_request(summary_request)
+    failed_rollup = lineage.start_request(
+        "root", compaction_id=compaction.compaction_id, rollup=True
+    )
+    lineage.fail_request(failed_rollup)
+    rollup_request = lineage.start_request(
+        "root", compaction_id=compaction.compaction_id, rollup=True
+    )
+    lineage.finish_request(rollup_request)
+    lineage.finish_compaction(compaction.compaction_id, "completed")
+    resumed_request = _finish(lineage, "root")
+
+    assert lineage.snapshot()["edges"] == [
+        {
+            "source_request_id": preceding_request,
+            "target_request_id": summary_request,
+            "type": "compaction_attempt",
+        },
+        {
+            "source_request_id": preceding_request,
+            "target_request_id": rollup_request,
+            "type": "compaction_attempt",
+        },
+        {
+            "source_request_id": summary_request,
+            "target_request_id": resumed_request,
+            "type": "compaction",
+        },
+    ]
+
+
 def test_failed_compaction_publishes_no_transition():
     lineage = SemanticEdgeTracker()
     lineage.register_session("root", parent_session_id=None)

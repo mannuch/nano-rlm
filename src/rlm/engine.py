@@ -27,12 +27,14 @@ from rlm.client import (
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
     CHECKPOINT_PROMPT,
+    ROLLUP_PROMPT,
+    STAIRCASE_FRAMING,
     TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
     REPL_NOTE,
-    SUMMARY_FRAMING,
     compactable,
     discover_threshold,
+    drilldown_note,
     estimated_tokens,
     is_context_overflow,
     truncate_tool_output,
@@ -47,7 +49,7 @@ from rlm.harness import (
     build_view,
     local_dir,
 )
-from rlm.semantic import SemanticEdgeTracker
+from rlm.semantic import Compaction, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt, render_harness
 from rlm.refinement import (
@@ -66,6 +68,7 @@ from rlm.refinement import (
     rollback_proposal,
 )
 from rlm.session import Session
+from rlm.staircase import Block, Staircase
 from rlm.skills import enable_builtin_skills
 from rlm.supervisor import SessionTreeSupervisor
 from rlm.tools import (
@@ -121,6 +124,18 @@ def _new_tokens(response, usage: TokenUsage) -> int:
     details = getattr(getattr(response, "usage", None), "prompt_tokens_details", None)
     cached = getattr(details, "cached_tokens", 0) or 0
     return max(usage.prompt_tokens - cached, 0) + usage.completion_tokens
+
+
+def _side_reply_text(response: Any) -> str:
+    """The usable text of a compaction side reply. Only a complete, tool-free reply's
+    final text counts: a reply that lives entirely in the reasoning channel is empty
+    and gets resampled like any other empty one."""
+    choice = response.choices[0]
+    message = choice.message
+    text = (message.content or "").strip()
+    if choice.finish_reason == "stop" and not message.tool_calls:
+        return text
+    return ""
 
 
 def _last_assistant_text(messages: list[dict]) -> str:
@@ -231,6 +246,7 @@ class RLMEngine:
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
         self.max_compaction_attempts = config.policy.max_compaction_attempts
+        self._staircase = Staircase(config.policy.compaction_fanout)
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt
         self.max_depth = config.policy.max_depth
@@ -300,9 +316,12 @@ class RLMEngine:
         self._pending_kernel_notices: list[str] = []
         self._prompt_kernel_notices: list[str] = []
 
-        # Turn index (0-based) at the start of the current branch. Used to
-        # report "turns since last compaction" when a compaction fires.
+        # Where the current branch (the context since the last compaction) begins:
+        # its first turn, ledger message index, and context window. A compaction
+        # closes the branch into a staircase block covering these ranges.
         self._branch_start_turn: int = 0
+        self._branch_first_index: int = 0
+        self._branch_first_window: int = 0
 
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
@@ -385,6 +404,8 @@ class RLMEngine:
         messages_before = self.session.messages
         last_good_before = self._last_good
         branch_start_before = self._branch_start_turn
+        branch_first_before = (self._branch_first_index, self._branch_first_window)
+        staircase_before = self._staircase.snapshot()
         compacted_before = self._compacted
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
@@ -458,6 +479,10 @@ class RLMEngine:
                 self._last_good = last_good_before
                 self._compacted = compacted_before
                 self._branch_start_turn = branch_start_before
+                self._branch_first_index, self._branch_first_window = (
+                    branch_first_before
+                )
+                self._staircase.restore(staircase_before)
                 self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
                 self._turn = turn_before
                 self._metrics.stop_reason = (
@@ -587,6 +612,8 @@ class RLMEngine:
 
             self._install_system_prompt(prompt)
             self._last_good = len(self.session.messages)
+            self._branch_first_index = self.session.message_count
+            self._branch_first_window = self.session.window
             self._started = True
         except BaseException:
             self._repl.shutdown()
@@ -1129,14 +1156,16 @@ class RLMEngine:
         checkpoint: bool = False,
         compaction_id: str | None = None,
         refinement_id: str | None = None,
+        rollup: bool = False,
     ) -> tuple[Any, TokenUsage]:
         """One model request. ``checkpoint`` marks a side call (compaction summary or
-        harness refinement): it spends tokens but is not a work turn."""
+        rollup, harness refinement): it spends tokens but is not a work turn."""
         checkpoint = checkpoint or refinement_id is not None
         request_id = self._semantic_edges.start_request(
             self._invocation_id,
             compaction_id=compaction_id,
             refinement_id=refinement_id,
+            rollup=rollup,
         )
         request: dict = {
             "model": self.model,
@@ -1234,18 +1263,20 @@ class RLMEngine:
         messages: list[dict],
         turn: int,
     ) -> None:
-        """Ask the model for a handoff summary and replace the session context.
+        """Close the current branch into a staircase block and replace the session
+        context with the staircase.
 
-        Installs the session context as ``[system, user(framing +
-        summary)]`` while preserving the IPython kernel. A summary attempt is
-        housekeeping, not a work turn: it does not count toward ``max_total_turns``.
-        Its tokens still land in ``_total_usage`` for cost accounting and count
-        toward token budgets. Every committed attempt remains represented in the
-        semantic graph.
+        The branch summary is a checkpoint call over the live context; its block is
+        appended to the staircase and any tier that just filled is rolled up by side
+        calls. The new window is ``[system, user(framing + staircase)]``, with the
+        IPython kernel preserved. Side calls are housekeeping, not work turns: they do
+        not count toward ``max_total_turns``, while their tokens land in
+        ``_total_usage`` and count toward token budgets. Every committed side request
+        remains represented in the semantic graph.
 
         Forwarding active tool schemas preserves vLLM's system-message tool block
         and prime-rl's trajectory extension property across compaction.
-        ``tool_choice="none"`` forbids tool calls in the summary response.
+        ``tool_choice="none"`` forbids tool calls in side responses.
         """
         dropped_chars = _count_messages_chars(messages[1:])
         turns_since_last = turn + 1 - self._branch_start_turn
@@ -1260,41 +1291,23 @@ class RLMEngine:
             )
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
-            # A rejected checkpoint falls back to the last good snapshot (which has a
-            # full reserve of room, so it fits); an incomplete, empty, or
-            # tool-calling reply is resampled. Reasoning is never part of the summary.
-            base = messages
-            summary_text = ""
-            for _ in range(self.max_compaction_attempts):
-                checkpoint = [
-                    *base,
-                    {"role": "user", "content": checkpoint_prompt},
-                ]
-                try:
-                    response, usage = await self._call_model(
-                        checkpoint,
-                        checkpoint=True,
-                        compaction_id=compaction.compaction_id,
-                    )
-                except APIStatusError as e:
-                    if not is_context_overflow(e):
-                        raise
-                    base = messages[: self._last_good]
-                    continue
-                choice = response.choices[0]
-                message = choice.message
-                # Reasoning never enters the summary: only the reply's final text
-                # counts, so a reply that lives entirely in the reasoning channel
-                # is resampled like an empty one.
-                text = (message.content or "").strip()
-                if choice.finish_reason == "stop" and not message.tool_calls and text:
-                    summary_text = text
-                    break
-                self._semantic_edges.release_summary_request(compaction.compaction_id)
-            if not summary_text:
-                raise CompactionFailed(
-                    f"no usable summary after {self.max_compaction_attempts} attempts"
-                )
+            summary_text, usage = await self._branch_summary(
+                messages, checkpoint_prompt, compaction
+            )
+            block = Block(
+                tier=1,
+                branches=(
+                    self._staircase.branch_count,
+                    self._staircase.branch_count + 1,
+                ),
+                messages=(self._branch_first_index, self.session.message_count - 1),
+                windows=(self._branch_first_window, self.session.window),
+                turns=(self._branch_start_turn, turn),
+                summary=summary_text,
+                request_id=self._last_request_id,
+            )
+            self._staircase.add_branch(block)
+            sealed = await self._seal_rollups(compaction)
         except BaseException as exc:
             self._semantic_edges.finish_compaction(
                 compaction.compaction_id,
@@ -1304,19 +1317,13 @@ class RLMEngine:
 
         system_msg = messages[0]
         self._last_handoff_summary = summary_text
-        compacted_user_content = (
-            SUMMARY_FRAMING
-            + "\n\n"
-            + summary_text
-            + "\n\nFull conversation history is available in "
-            + str(self.session.dir / "messages.jsonl")
-            + ". Use `from rlm import history; h = await history()` to inspect "
-            "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
-            "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
-            "identifies the user record whose attempt was rolled back."
-        )
         compaction_message, provenance = runtime_event(
-            "compaction", compacted_user_content
+            "compaction",
+            STAIRCASE_FRAMING
+            + "\n\n"
+            + self._staircase.render()
+            + "\n\n"
+            + drilldown_note(str(self.session.dir / "messages.jsonl")),
         )
         window = self.session.replace_context(
             [system_msg, compaction_message],
@@ -1332,6 +1339,8 @@ class RLMEngine:
                 "type": "compaction",
                 "turn": turn,
                 "summary": summary_text,
+                "block": block.to_record(),
+                "rollups_sealed": sealed,
                 "provenance": provenance,
                 "window": window,
                 "summary_message_index": self.session.context_indices[-1],
@@ -1354,8 +1363,121 @@ class RLMEngine:
             )
         )
         self._branch_start_turn = turn + 1
+        self._branch_first_index = self.session.message_count
+        self._branch_first_window = window
         self._metrics.turns_since_last_compaction = 0
         self._compact_refine_pending = True
+
+    async def _branch_summary(
+        self, messages: list[dict], checkpoint_prompt: str, compaction: Compaction
+    ) -> tuple[str, TokenUsage]:
+        """The handoff summary of the current branch, from the live context."""
+        # A rejected checkpoint falls back to the last good snapshot (which has a
+        # full reserve of room, so it fits); an incomplete, empty, or
+        # tool-calling reply is resampled. Reasoning is never part of the summary.
+        base = messages
+        for _ in range(self.max_compaction_attempts):
+            checkpoint = [
+                *base,
+                {"role": "user", "content": checkpoint_prompt},
+            ]
+            try:
+                response, usage = await self._call_model(
+                    checkpoint,
+                    checkpoint=True,
+                    compaction_id=compaction.compaction_id,
+                )
+            except APIStatusError as e:
+                if not is_context_overflow(e):
+                    raise
+                base = messages[: self._last_good]
+                continue
+            text = _side_reply_text(response)
+            if text:
+                return text, usage
+            self._semantic_edges.release_summary_request(compaction.compaction_id)
+        raise CompactionFailed(
+            f"no usable summary after {self.max_compaction_attempts} attempts"
+        )
+
+    async def _seal_rollups(self, compaction: Compaction) -> list[list[int]]:
+        """Roll up every tier the staircase can seal, finest first, and return the
+        sealed ``[tier, start, end]`` ranges.
+
+        One compaction spends at most ``max_compaction_attempts`` rollup calls in
+        total: the usual cycle needs none or one, so the budget only binds when
+        earlier rollups keep failing. A rollup that yields no usable reply, or does
+        not fit the budget, is skipped: the staircase shows its children instead and
+        the next compaction retries it.
+        """
+        sealed: list[list[int]] = []
+        skipped: set[tuple[int, int, int]] = set()
+        calls_left = self.max_compaction_attempts
+        while pending := [
+            key for key in self._staircase.unsealed() if key not in skipped
+        ]:
+            for key in pending:
+                if calls_left == 0:
+                    return sealed
+                tier, start, end = key
+                children = self._staircase.children(tier, start, end)
+                request = [
+                    self.session.messages[0],
+                    {
+                        "role": "user",
+                        "content": ROLLUP_PROMPT
+                        + "\n\n".join(
+                            f"{child.header()}\n{child.summary}" for child in children
+                        ),
+                    },
+                ]
+                text = ""
+                while calls_left > 0:
+                    calls_left -= 1
+                    try:
+                        response, usage = await self._call_model(
+                            request,
+                            checkpoint=True,
+                            compaction_id=compaction.compaction_id,
+                            rollup=True,
+                        )
+                    except APIStatusError:
+                        logger.warning(
+                            "rlm: tier %d rollup of branches %d-%d skipped",
+                            tier,
+                            start,
+                            end - 1,
+                            exc_info=True,
+                        )
+                        break
+                    text = _side_reply_text(response)
+                    if text:
+                        break
+                if not text:
+                    skipped.add(key)
+                    continue
+                block = Block(
+                    tier=tier,
+                    branches=(start, end),
+                    messages=(children[0].messages[0], children[-1].messages[1]),
+                    windows=(children[0].windows[0], children[-1].windows[1]),
+                    turns=(children[0].turns[0], children[-1].turns[1]),
+                    summary=text,
+                    request_id=self._last_request_id,
+                )
+                self._staircase.seal(block)
+                self.session.log(
+                    {
+                        "type": "rollup",
+                        **block.to_record(),
+                        "usage": {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                        },
+                    }
+                )
+                sealed.append([tier, start, end])
+        return sealed
 
     def execution_snapshot(self) -> dict:
         """Return a credential-free snapshot of cumulative execution state."""
@@ -1402,6 +1524,7 @@ class RLMEngine:
                 "summarize_at_tokens": self.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
+                "compaction_fanout": self._staircase.fanout,
                 "allow_git": self.runtime_config.policy.allow_git,
                 "harness_enabled": self.harness_config.enabled,
                 "harness_global": self.harness_config.global_dir is not None,

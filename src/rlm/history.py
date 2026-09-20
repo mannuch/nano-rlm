@@ -9,6 +9,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+_BLOCK_FIELDS = (
+    "tier",
+    "branches",
+    "messages",
+    "windows",
+    "turns",
+    "summary",
+    "request_id",
+)
+
+
 def read_records(path: Path) -> Iterator[dict]:
     with path.open("rb") as stream:
         for line in stream:
@@ -57,6 +68,24 @@ class History:
                         event["window"], event["reason"], list(indices), self.messages
                     )
                 )
+
+    @property
+    def blocks(self) -> list[dict]:
+        """Compaction staircase blocks in ledger order, excluding those of rolled-back
+        prompt attempts: each names the ``tier`` and the ``branches``, ``messages``,
+        ``windows``, and ``turns`` ranges its ``summary`` covers."""
+        blocks: list[tuple[int, dict]] = []
+        positions: dict[str, int] = {}
+        for position, event in enumerate(self.events):
+            positions.setdefault(event["id"], position)
+            if event["type"] == "compaction" and "block" in event:
+                blocks.append((position, event["block"]))
+            elif event["type"] == "rollup":
+                blocks.append((position, {key: event[key] for key in _BLOCK_FIELDS}))
+            elif event["type"] == "prompt_rollback":
+                attempt = positions.get(event["prompt_id"], position)
+                blocks = [item for item in blocks if item[0] < attempt]
+        return [block for _, block in blocks]
 
     def user_messages(self) -> list[dict]:
         """Original user inputs, including attempts identified by rollback events."""
