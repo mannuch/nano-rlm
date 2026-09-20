@@ -175,6 +175,50 @@ There is no model-driven compaction tool. Compaction is on by default and unlimi
 
 Compaction is tiered, after headlong's memory pyramid: instead of replacing the window with one summary that every later compaction re-summarizes, the engine keeps the whole session in context at decreasing resolution and keeps the newest messages verbatim.
 
+### Windows versus branches
+
+Two words come up throughout this section and they are easy to conflate.
+
+Think of the session as a long strip of paper: the ledger (`messages.jsonl`). Every message ever sent to or received from the model is written on it once, in order, and gets a number that never changes. Nothing is ever erased.
+
+A **window** is a frame laid over that strip: the set of messages the model can currently see. When something replaces the model's context (session start, compaction, rollback, or a harness refinement swapping the system prompt) the engine puts down a new frame and gives it the next number. Frames are how the ledger answers "what exactly did the model see at request 57?"
+
+A **branch** is a stretch of the strip between two compactions: the part of the story that one tier-1 block summarizes. Only compaction ends a branch.
+
+Most of the time one branch is one window:
+
+```text
+ledger   0 ──── 1 ──── 2 ──── 3 ──── 4 ──── 5 ──── 6 ──── 7 ──── 8
+         sys   task   call   res    call   res   |stair|  call   res
+                                                 |  A  |
+window   ├──────────── window 0 ─────────────────┤├──── window 1 ────
+branch   ├──────────── branch 0 ─────────────────┤├──── branch 1 ────
+                                                 ^ compaction
+```
+
+They differ in two situations. A harness refinement opens a new window without compacting, because the system prompt changed in place while every other message kept its number; the branch keeps going, so a block records a window *range*:
+
+```text
+ledger   0 ─── 1 ─── 2 ─── 3 ─── 9 ─── 4 ─── 5 ─── 6
+         sys  task  call  res   sys'  call  res   ...
+window   ├── window 0 ─────────┤├──── window 1 ────────
+branch   ├──────────────── branch 0 ───────────────────
+                               ^ refinement: new system message (9), same branch
+```
+
+And with the verbatim tail, a window after compaction *starts* with the last few messages of the branch before it. Those messages keep their numbers and belong to the next block, so the blocks tile the strip without gaps:
+
+```text
+ledger   0 ─── 1 ─── 2 ─── 3 ─── 4 ─── 5 ─── 6 ─── 7
+         sys  task  call  res  stair  call  res  stair
+                     └─ tail ─┘
+window 1 seeds: [0, 4, 2, 3]   (system, staircase, then the tail by number)
+block A  covers 1-1            (the branch before the tail)
+block B  covers 2-4            (the tail, the staircase message, and what followed)
+```
+
+A rollback also opens a window, restoring the pre-prompt frame, and restores the branch bookkeeping with it. So: windows are how the ledger addresses context; branches are how compaction chunks time; a branch spans one or more windows, and a window can hold the end of one branch and the start of the next.
+
 ### Branches and blocks
 
 The context since the last compaction is a *branch*. When a branch is compacted, the engine asks the model, in context, for a plain-text handoff summary of that branch (reasoning is never part of it) and records it as a tier-1 *block*. A block is immutable and is a pointer into the ledger: its header names the message, window, and turn ranges it summarizes, so the raw `messages.jsonl` stays the source of truth and the summary is an index into it.
