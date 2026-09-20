@@ -173,7 +173,7 @@ The supervisor owns inboxes and instruction queues. Each agent's `inbox.jsonl` r
 
 There is no model-driven compaction tool. Compaction is on by default and unlimited (the policy's `compaction` field turns it off, `max_compactions` caps it); the default 1M `max_total_tokens` tree budget keeps sessions bounded, since each compaction cycle itself spends new tokens. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it; small windows keep at least half. Set `summarize_at_tokens` to pin the threshold explicitly. Without a known window or explicit threshold, proactive compaction stays off, but a provider overflow still triggers it reactively. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.
 
-Compaction is tiered, after headlong's memory pyramid: instead of replacing the window with one summary that every later compaction re-summarizes, the engine keeps the whole session in context at decreasing resolution and keeps the newest messages verbatim.
+Compaction is tiered, after headlong's memory pyramid: instead of replacing the window with one summary that every later compaction re-summarizes, the engine keeps the whole session in context at decreasing resolution and keeps the current prompt and the newest messages verbatim.
 
 ### Windows versus branches
 
@@ -212,7 +212,7 @@ And with the verbatim tail, a window after compaction *starts* with the last few
 ledger   0 ─── 1 ─── 2 ─── 3 ─── 4 ─── 5 ─── 6 ─── 7
          sys  task  call  res  stair  call  res  stair
                      └─ tail ─┘
-window 1 seeds: [0, 4, 2, 3]   (system, staircase, then the tail by number)
+window 1 seeds: [0, 1, 4, 2, 3]   (system, pinned task, staircase, then the tail by number)
 block A  covers 1-1            (the branch before the tail)
 block B  covers 2-4            (the tail, the staircase message, and what followed)
 ```
@@ -247,7 +247,7 @@ A rollup seals as soon as its `F` children exist and is then never rebuilt; only
 
 ### The staircase
 
-The fresh window after a compaction is `[system, staircase, tail]`. The staircase lists blocks oldest first at decreasing resolution: the branch count `N` is decomposed in base `F`, and tier k contributes the aligned blocks just older than the finer tiers, at most `F - 1` of them. The coarsest block always starts at branch 0, so nothing in the session is unrepresented, and the whole staircase is bounded by `(F - 1) * log_F(N)` blocks.
+The fresh window after a compaction is `[system, prompt, staircase, tail]`. The staircase lists blocks oldest first at decreasing resolution: the branch count `N` is decomposed in base `F`, and tier k contributes the aligned blocks just older than the finer tiers, at most `F - 1` of them. The coarsest block always starts at branch 0, so nothing in the session is unrepresented, and the whole staircase is bounded by `(F - 1) * log_F(N)` blocks.
 
 With `F = 2` the layout after each compaction is:
 
@@ -278,12 +278,21 @@ record         system  task  call  result  stairc.  call  result  stairc.
 
 window 0       [0, 1, 2, 3]                       <- first branch
 compaction 1   block A = messages 1-1, tail = [2, 3]
-window 1       [0, 4, 2, 3, 5, 6]                 <- system, staircase, tail, new work
+window 1       [0, 1, 4, 2, 3, 5, 6]              <- system, pinned task, staircase, tail, new work
 compaction 2   block B = messages 2-4, tail = [5, 6]
-window 2       [0, 7, 5, 6]
+window 2       [0, 1, 7, 5, 6]
 ```
 
 This toy session has one call per branch, so the tail takes nearly all of it; in practice a branch holds far more than its tail. The summary request is told how many messages will stay verbatim so it covers what precedes them; the branch block ends just before the tail, and the kept tail opens the next branch, so block message ranges stay gapless (block B above starts where block A's tail started).
+
+### The pinned prompt
+
+The current prompt (the latest `user` or parent instruction, not a supervisor notice) is re-attached by ledger index between the system message and the staircase whenever it fits `compaction_prompt_tokens` (default 4k estimated tokens; 0 never pins), so the task is never reconstructed from a summary and the `[system, prompt]` prefix stays stable across compactions. A larger prompt is referenced by ledger index in the staircase message instead (`h.messages[i]`); a prompt already inside the kept tail is not duplicated. The `compaction` record names the `pinned_prompt_index`.
+
+```text
+window after compaction:  [system] [prompt] [staircase] [tail...]
+                           ^ stable prefix   ^ new         ^ re-attached by index
+```
 
 ### Drill-down
 
@@ -294,11 +303,11 @@ from rlm import history
 
 h = await history()
 h.blocks                                     # [{"tier": 1, "branches": [0, 1], "messages": [1, 1], ...}, ...]
-a, b = h.blocks[-1]["messages"]
-h.messages[a : b + 1]                        # what the newest block summarizes
+h.expand(-1)                                 # the messages the newest block summarizes
+h.expand(h.blocks[0])                        # a block record works too
 ```
 
-`h.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
+`h.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts; `h.expand` returns the slice of `h.messages` a block covers, which for a rolled-up block is everything its children covered. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
 
 ### Budgets and failure
 
@@ -330,6 +339,7 @@ earlier = h.windows[0].messages       # Initial working context
 child_history = history(session_dir="/path/to/child-session")
 message = child_history.windows[4].messages[2]  # If that child has reached window 4
 blocks = h.blocks                     # Compaction blocks with the ranges they cover
+originals = h.expand(blocks[0])       # The messages the first block summarizes
 ```
 
 Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.

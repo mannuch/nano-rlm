@@ -52,13 +52,24 @@ STAIRCASE_FRAMING = (
 )
 
 
+PINNED_PROMPT_NOTE = "The current request precedes this message verbatim."
+
+
+def prompt_pointer_note(index: int) -> str:
+    return (
+        f"The current request is message {index} of the ledger, too large to keep in "
+        f"context verbatim: read it with `h.messages[{index}]`."
+    )
+
+
 def drilldown_note(ledger_path: str) -> str:
     return (
         f"Full conversation history is available in {ledger_path}. "
-        "Use `from rlm import history; h = await history()` to inspect `h.messages[a:b + 1]` "
-        "(the messages a block covers), `h.windows[w].messages`, `h.blocks` (every block "
-        "record), or `h.user_messages()`. Search or read relevant records with Python when a "
-        "block lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
+        "Use `from rlm import history; h = await history()` to inspect `h.blocks` (every "
+        "block record, in order), `h.expand(h.blocks[i])` or `h.expand(i)` (the messages "
+        "that block summarizes), `h.messages[a:b + 1]`, `h.windows[w].messages`, or "
+        "`h.user_messages()`. Search or read relevant records with Python when a block "
+        "lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
         "identifies the user record whose attempt was rolled back."
     )
 

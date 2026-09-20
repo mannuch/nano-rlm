@@ -157,6 +157,7 @@ class _Engine:
                 "max_compaction_attempts": 5,
                 "compaction_fanout": 5,
                 "compaction_tail_tokens": 12000,
+                "compaction_prompt_tokens": 4000,
                 "allow_git": False,
                 "harness_enabled": True,
                 "harness_global": False,

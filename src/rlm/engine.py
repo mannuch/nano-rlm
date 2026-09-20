@@ -12,6 +12,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from rlm.compaction import (
     ROLLUP_PROMPT,
     STAIRCASE_FRAMING,
     TOOL_OUTPUT_MAX_BYTES,
+    PINNED_PROMPT_NOTE,
     CompactionFailed,
     REPL_NOTE,
     compactable,
@@ -37,6 +39,7 @@ from rlm.compaction import (
     drilldown_note,
     estimated_tokens,
     is_context_overflow,
+    prompt_pointer_note,
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
@@ -248,6 +251,7 @@ class RLMEngine:
         self.max_compaction_attempts = config.policy.max_compaction_attempts
         self._staircase = Staircase(config.policy.compaction_fanout)
         self.compaction_tail_tokens = config.policy.compaction_tail_tokens
+        self.compaction_prompt_tokens = config.policy.compaction_prompt_tokens
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt
         self.max_depth = config.policy.max_depth
@@ -323,6 +327,9 @@ class RLMEngine:
         self._branch_start_turn: int = 0
         self._branch_first_index: int = 0
         self._branch_first_window: int = 0
+        # The latest prompt (ledger index and message), kept verbatim across
+        # compaction so the task never has to be reconstructed from a summary.
+        self._pinned_prompt: tuple[int, dict] | None = None
 
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
@@ -407,6 +414,7 @@ class RLMEngine:
         branch_start_before = self._branch_start_turn
         branch_first_before = (self._branch_first_index, self._branch_first_window)
         staircase_before = self._staircase.snapshot()
+        pinned_before = self._pinned_prompt
         compacted_before = self._compacted
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
@@ -454,6 +462,8 @@ class RLMEngine:
                     },
                     in_context=True,
                 )
+                if message_type != "supervisor_notification":
+                    self._pinned_prompt = (self.session.message_count - 1, message)
                 self._last_good = len(self.session.messages)
                 result = await self._run_loop()
         except BaseException as exc:
@@ -484,6 +494,7 @@ class RLMEngine:
                     branch_first_before
                 )
                 self._staircase.restore(staircase_before)
+                self._pinned_prompt = pinned_before
                 self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
                 self._turn = turn_before
                 self._metrics.stop_reason = (
@@ -1269,9 +1280,10 @@ class RLMEngine:
 
         The branch summary is a checkpoint call over the live context; its block is
         appended to the staircase and any tier that just filled is rolled up by side
-        calls. The new window is ``[system, user(framing + staircase), *tail]``: the
-        most recent messages that fit ``compaction_tail_tokens`` stay verbatim, keeping
-        their ledger indices, and the IPython kernel is preserved. Side calls are housekeeping, not work turns: they do
+        calls. The new window is ``[system, prompt, user(framing + staircase), *tail]``:
+        the current prompt (when it fits ``compaction_prompt_tokens``) and the most
+        recent messages that fit ``compaction_tail_tokens`` stay verbatim, keeping their
+        ledger indices, and the IPython kernel is preserved. Side calls are housekeeping, not work turns: they do
         not count toward ``max_total_turns``, while their tokens land in
         ``_total_usage`` and count toward token budgets. Every committed side request
         remains represented in the semantic graph.
@@ -1285,10 +1297,18 @@ class RLMEngine:
             messages, indices, self._branch_first_index, self._tail_budget()
         )
         tail = messages[tail_start:]
+        pinned = self._pinned_for_window(indices[tail_start:])
         dropped_chars = _count_messages_chars(messages[1:tail_start])
+        if pinned is not None and pinned[0] in indices[:tail_start]:
+            dropped_chars -= _count_messages_chars([pinned[1]])
         turns_since_last = turn + 1 - self._branch_start_turn
 
         checkpoint_prompt = CHECKPOINT_PROMPT
+        if pinned is not None:
+            checkpoint_prompt += (
+                "\n\nThe current request remains in context verbatim after compaction:"
+                " do not restate it."
+            )
         if tail:
             checkpoint_prompt += (
                 f"\n\nThe last {len(tail)} messages of the conversation remain in context "
@@ -1333,17 +1353,32 @@ class RLMEngine:
 
         system_msg = messages[0]
         self._last_handoff_summary = summary_text
+        framing = STAIRCASE_FRAMING
+        if pinned is not None:
+            framing += " " + PINNED_PROMPT_NOTE
+        elif (
+            self._pinned_prompt is not None
+            and self._pinned_prompt[0] not in indices[tail_start:]
+        ):
+            framing += " " + prompt_pointer_note(self._pinned_prompt[0])
         compaction_message, provenance = runtime_event(
             "compaction",
-            STAIRCASE_FRAMING
+            framing
             + "\n\n"
             + self._staircase.render()
             + "\n\n"
             + drilldown_note(str(self.session.dir / "messages.jsonl")),
         )
+        summary_index = self.session.log(
+            {"type": "context_message", "message": compaction_message}
+        )
+        seed = [system_msg, compaction_message, *tail]
+        seed_indices = [indices[0], summary_index, *indices[tail_start:]]
+        if pinned is not None:
+            seed[1:1] = [pinned[1]]
+            seed_indices[1:1] = [pinned[0]]
         window = self.session.replace_context(
-            [system_msg, compaction_message, *tail],
-            reason="compaction",
+            seed, reason="compaction", indices=seed_indices
         )
         self._last_good = len(self.session.messages)
         self._compacted = True
@@ -1360,7 +1395,8 @@ class RLMEngine:
                 "tail_message_indices": list(indices[tail_start:]),
                 "provenance": provenance,
                 "window": window,
-                "summary_message_index": self.session.context_indices[-1],
+                "summary_message_index": summary_index,
+                "pinned_prompt_index": pinned[0] if pinned is not None else None,
                 "summary_chars": len(summary_text),
                 "dropped_chars": dropped_chars,
                 "turns_since_last_compaction": turns_since_last,
@@ -1387,6 +1423,18 @@ class RLMEngine:
         self._branch_first_window = window
         self._metrics.turns_since_last_compaction = 0
         self._compact_refine_pending = True
+
+    def _pinned_for_window(
+        self, tail_indices: Sequence[int]
+    ) -> tuple[int, dict] | None:
+        """The prompt to re-attach ahead of the staircase: the latest one, unless it
+        is already in the kept tail or exceeds ``compaction_prompt_tokens``."""
+        pinned = self._pinned_prompt
+        if pinned is None or pinned[0] in tail_indices:
+            return None
+        if estimated_tokens(json.dumps(pinned[1])) > self.compaction_prompt_tokens:
+            return None
+        return pinned
 
     def _tail_budget(self) -> int:
         if self.summarize_at_tokens is None:
@@ -1551,6 +1599,7 @@ class RLMEngine:
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "compaction_fanout": self._staircase.fanout,
                 "compaction_tail_tokens": self.compaction_tail_tokens,
+                "compaction_prompt_tokens": self.compaction_prompt_tokens,
                 "allow_git": self.runtime_config.policy.allow_git,
                 "harness_enabled": self.harness_config.enabled,
                 "harness_global": self.harness_config.global_dir is not None,
