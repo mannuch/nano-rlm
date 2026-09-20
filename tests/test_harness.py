@@ -493,6 +493,23 @@ def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
     assert "/s/<name>/src/<name>/__init__.py" in block and "/s/<name>/SKILL.md" in block
 
 
+def _episode_metadata(**overrides):
+    return {
+        "session_dir": "/tmp/abc",
+        "session_id": "abc",
+        "stop_reason": "done",
+        "prompts": ["fix the parser"],
+        "turns": 3,
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "cwd": "/repo",
+        "blocks": [],
+        "started_at": 1.0,
+        "ended_at": 2.0,
+        **overrides,
+    }
+
+
 def test_episode_entries_are_engine_owned(tmp_path):
     store = HarnessStore(tmp_path / "g", scope="global")
     entry = store.upsert(
@@ -501,14 +518,12 @@ def test_episode_entries_are_engine_owned(tmp_path):
         "Outcome (done): fixed",
         id="episode-abc",
         path="episodes/2026-09",
-        metadata={"session_dir": "/tmp/abc"},
+        metadata=_episode_metadata(),
         source="engine",
     )
     assert entry.kind == "episode" and store.count("episode") == 1
     reloaded = HarnessStore(tmp_path / "g", scope="global").load()
-    assert reloaded.get("episode", "episode-abc").metadata == {
-        "session_dir": "/tmp/abc"
-    }
+    assert reloaded.get("episode", "episode-abc").metadata == _episode_metadata()
     view = build_view(local_dir(tmp_path), global_dir=tmp_path / "g")
     assert view.counts()["global"]["episode"] == 1
     assert "episode: 1\n  - [global:episode-abc] fix the parser" in view.overview()
@@ -675,3 +690,65 @@ def test_episode_paths_sort_chronologically():
         next_month,
     ]
     assert next_month.startswith("episodes/2025-10/")
+
+
+def test_entry_payloads_are_validated_by_kind(tmp_path):
+    store = HarnessStore(tmp_path / "h")
+    with pytest.raises(ValueError, match="session_id"):
+        store.upsert(
+            "episode", "t", "c", id="episode-x", metadata={"session_dir": "/tmp/x"}
+        )
+    with pytest.raises(ValueError, match="started_at"):
+        store.upsert(
+            "episode",
+            "t",
+            "c",
+            id="episode-x",
+            metadata=_episode_metadata(started_at="soon"),
+        )
+    with pytest.raises(ValueError, match="arguments"):
+        store.create(
+            "skill",
+            "Search",
+            "x",
+            reference={"type": "python", "import": "websearch", "callable": "run"},
+            arguments={"queries": "a list"},
+        )
+    entry = store.create(
+        "skill",
+        "Search",
+        "x",
+        reference={
+            "type": "python",
+            "import": "websearch",
+            "callable": "run",
+            "note": 1,
+        },
+        arguments={"queries": {"type": "array", "required": True}},
+    )
+    # Payloads are normalized: known fields filled in, unknown ones kept.
+    assert entry.reference == {
+        "type": "python",
+        "import": "websearch",
+        "callable": "run",
+        "call_pattern": None,
+        "note": 1,
+    }
+    assert entry.arguments == {
+        "queries": {
+            "type": "array",
+            "required": True,
+            "default": None,
+            "description": None,
+        }
+    }
+    # Memory metadata stays free-form.
+    free = store.create("memory", "m", "c", metadata={"anything": [1, 2]})
+    assert free.metadata == {"anything": [1, 2]}
+
+    state = tmp_path / "h" / "harness_state.json"
+    data = json.loads(state.read_text())
+    data["entries"]["skill"]["search"]["reference"] = {"type": "python"}
+    state.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="invalid skill entry 'search'"):
+        HarnessStore(tmp_path / "h").load()

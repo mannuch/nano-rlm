@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from pydantic import ValidationError
+
 from rlm.harness import (
     ENGINE_KINDS,
     KINDS,
@@ -26,6 +28,8 @@ from rlm.harness import (
     HarnessStore,
     HarnessView,
     RefinementEvent,
+    SkillArgument,
+    SkillReference,
     compact,
     slug,
 )
@@ -399,20 +403,23 @@ def validate_edit(
         return None
     if edit.arguments is None:
         return f"{edit.action} skill requires arguments"
-    reference = edit.reference
-    if not reference or reference.get("type") != "python":
+    if not edit.reference:
         return f"{edit.action} skill requires a python reference"
-    module = reference.get("import")
-    if not isinstance(module, str) or not module:
-        return f"{edit.action} skill requires a python import"
-    if not any(
-        isinstance(reference.get(key), str) and reference[key]
-        for key in ("callable", "call_pattern")
-    ):
-        return f"{edit.action} skill requires callable or call_pattern"
-    if module.split(".")[0] not in importable_names:
-        return f"{edit.action} skill references unknown module {module!r}"
+    try:
+        reference = SkillReference.model_validate(edit.reference)
+        for spec in edit.arguments.values():
+            SkillArgument.model_validate(spec)
+    except ValidationError as error:
+        return f"{edit.action} skill is malformed: {_first_error(error)}"
+    if reference.import_.split(".")[0] not in importable_names:
+        return f"{edit.action} skill references unknown module {reference.import_!r}"
     return None
+
+
+def _first_error(error: ValidationError) -> str:
+    detail = error.errors()[0]
+    location = ".".join(str(part) for part in detail["loc"])
+    return f"{location}: {detail['msg']}" if location else detail["msg"]
 
 
 def apply_proposal(
@@ -458,7 +465,7 @@ def apply_proposal(
             kind: HarnessKind = edit.kind  # type: ignore[assignment]
             records = store.entries[kind]
             before = records.get(entry_id)
-            outcome.before = asdict(before) if before is not None else None
+            outcome.before = before.model_dump() if before is not None else None
             key = f"{kind}:{entry_id}"
             if baseline is not None and key not in touched:
                 if outcome.before != baseline.get(kind, {}).get(entry_id):
@@ -497,7 +504,7 @@ def apply_proposal(
                     version=before.version + 1 if before else 1,
                 )
                 records[entry_id] = after
-                outcome.after = asdict(after)
+                outcome.after = after.model_dump()
             touched.add(key)
             outcome.applied = True
         result = RefinementResult(
@@ -578,7 +585,7 @@ def baseline_of(store: HarnessStore) -> dict[str, dict[str, dict[str, Any]]]:
     """Entries as they are now, for conflict detection at apply time."""
     store.load()
     return {
-        kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
+        kind: {entry_id: entry.model_dump() for entry_id, entry in records.items()}
         for kind, records in store.entries.items()
     }
 

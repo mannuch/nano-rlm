@@ -433,6 +433,34 @@ atomically under a file lock and reloaded when another writer changed them, so t
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
 store outside a running session.
 
+### Entry schema
+
+Every entry is one `HarnessEntry` record (a Pydantic model in `rlm.harness`) with the same
+base fields for all kinds, and kind-specific structure inside three payload dicts that is
+validated whenever an entry is created, updated, restored or loaded from disk:
+
+| field | type | notes |
+| --- | --- | --- |
+| `id`, `kind`, `title`, `content` | `str` | `id` is a slug of the title unless given; `kind` is one of `prompt`, `memory`, `skill`, `subagent`, `episode` |
+| `path` | `str` | grouping facet, default `general`; not a filesystem path |
+| `scope` | `local` \| `global` | the store the entry lives in |
+| `reference`, `arguments`, `metadata` | `dict` | payloads, see below |
+| `source` | `str` | `agent`, `refinement` or `engine` |
+| `created_at`, `updated_at`, `version` | | maintained by the store |
+
+| kind | payload | model |
+| --- | --- | --- |
+| `skill` | `reference` | `SkillReference`: `type: "python"`, `import` (module), and `callable` and/or `call_pattern` |
+| `skill` | `arguments` | `{name: SkillArgument}` with `type`, `required` (default false), `default`, `description` |
+| `episode` | `metadata` | `EpisodeMetadata`: `session_dir`, `session_id`, `stop_reason`, `prompts`, `turns`, `prompt_tokens`, `completion_tokens`, `cwd`, `blocks` (`BlockRecord`s), `started_at`, `ended_at` |
+| others | `metadata` | free-form |
+
+Payload models keep unknown keys, so a store written by a newer build still loads, and
+fill in optional ones, so `entry.reference["call_pattern"]` is always present on a skill.
+A violation raises `ValueError` naming the field (`arguments.queries: Input should be a
+valid dictionary ...`) from the kernel API, is reported per edit by a refinement pass, and
+fails `load()` with the store path and entry id when a state file is inconsistent.
+
 ### Skill entries versus skill packages
 
 Three things share the word "skill", and they are different kinds of object:
