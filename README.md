@@ -363,6 +363,21 @@ Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directorie
 
 These artifacts are consumable for debugging, visualization, or training-data extraction.
 
+The only cross-session file is the optional global harness store, which lives wherever
+`harness.global_dir` points, outside any session directory:
+
+```text
+<global_dir>/
+├── harness_state.json     # global prompt/memory/skill/subagent entries and, when
+│                          # record_episodes is on, one episode entry per root session
+└── refinements.jsonl
+```
+
+An episode entry's `path` field (`episodes/<YYYY-MM>/…`) is a facet inside that JSON file,
+not a directory; the entry points back at its session through `metadata.session_dir`, and
+the session's `messages.jsonl` records the `global_dir` it published to. Nothing under
+`sessions/<id>/` changes.
+
 ## Continual harness
 
 The continual harness is durable state that supplements the immutable system prompt: `prompt`
@@ -524,9 +539,10 @@ the semantic entries above. With `record_episodes: true` **and** a `global_dir`,
 engine writes one `episode` entry into the global store when the session closes, without
 any model call:
 
-- `title`: the first line of the first prompt; `path`:
-  `episodes/<YYYY-MM>/<DD>T<HHMMSS.mmm>-<session id>` from the session's start time, so
-  episodes list chronologically within the kind and a month or day is a searchable term.
+- `title`: the first line of the first prompt; the entry's `path` field (a facet, not a
+  directory): `episodes/<YYYY-MM>/<DD>T<HHMMSS.mmm>-<session id>` from the session's start
+  time, so episodes list chronologically within the kind and a month or day is a
+  searchable term.
 - `content`: `Prompts (n):` with the first line of every prompt (the first ten listed,
   the rest counted), then the compaction staircase as it stood at close (the coarsest
   blocks, or `(no compaction)` for a session that fit one window), then
