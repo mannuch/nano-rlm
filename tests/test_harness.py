@@ -15,6 +15,7 @@ from conftest import (
 
 from rlm.config import ExecutionPolicy, HarnessConfig, InvocationContext, RuntimeConfig
 from rlm.engine import RLMEngine
+from rlm.history import read_records
 from rlm.harness import (
     HarnessStore,
     build_view,
@@ -46,7 +47,13 @@ def test_store_crud_and_versioning(tmp_path):
 
     data = json.loads((tmp_path / "h" / "harness_state.json").read_text())
     assert data["schema"] == 1
-    assert list(data["entries"]) == ["prompt", "memory", "skill", "subagent"]
+    assert list(data["entries"]) == [
+        "prompt",
+        "memory",
+        "skill",
+        "subagent",
+        "episode",
+    ]
     assert data["entries"]["memory"]["check_git_status"]["version"] == 2
 
     assert store.delete("memory", entry.id) is True
@@ -482,3 +489,136 @@ def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
     )
     block = render_harness(view, skills_dir="/s")
     assert "/s/<name>/src/<name>/__init__.py" in block and "/s/<name>/SKILL.md" in block
+
+
+def test_episode_entries_are_engine_owned(tmp_path):
+    store = HarnessStore(tmp_path / "g", scope="global")
+    entry = store.upsert(
+        "episode",
+        "fix the parser",
+        "Outcome (done): fixed",
+        id="episode-abc",
+        path="episodes/2026-09",
+        metadata={"session_dir": "/tmp/abc"},
+        source="engine",
+    )
+    assert entry.kind == "episode" and store.count("episode") == 1
+    reloaded = HarnessStore(tmp_path / "g", scope="global").load()
+    assert reloaded.get("episode", "episode-abc").metadata == {
+        "session_dir": "/tmp/abc"
+    }
+    view = build_view(local_dir(tmp_path), global_dir=tmp_path / "g")
+    assert view.counts()["global"]["episode"] == 1
+    assert "episode: 1\n  - [global:episode-abc] fix the parser" in view.overview()
+    assert [e.id for e in view.search("parser", kind="episode")] == ["episode-abc"]
+    for call in (
+        lambda: view.create("episode", "t", "c", global_=True),
+        lambda: view.update("episode", "global:episode-abc", "t", "c"),
+        lambda: view.delete("episode", "global:episode-abc"),
+    ):
+        with pytest.raises(PermissionError, match="written by the engine"):
+            call()
+    assert reloaded.load().count("episode") == 1
+
+    legacy = tmp_path / "old"
+    legacy.mkdir()
+    (legacy / "harness_state.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "entries": {"prompt": {}, "memory": {}, "skill": {}, "subagent": {}},
+                "refinements": [],
+            }
+        )
+    )
+    assert HarnessStore(legacy).load().count("episode") == 0
+
+
+@pytest.mark.parametrize("record", [True, False])
+async def test_root_session_records_an_episode_at_close(session, tmp_path, record):
+    global_dir = tmp_path / "global"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content="fixed the parser"),
+        ]
+    )
+    config = make_runtime_config(
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=record)
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    result = await engine.run("fix the parser\nsecond line")
+
+    assert result.answer == "fixed the parser"
+    assert engine.execution_snapshot()["limits"]["record_episodes"] is record
+    store = HarnessStore(global_dir, scope="global").load()
+    episodes = store.list("episode")
+    records = [
+        r
+        for r in read_records(session.dir / "messages.jsonl")
+        if r["type"] == "episode"
+    ]
+    if not record:
+        assert episodes == [] and records == []
+        return
+    (episode,) = episodes
+    assert episode.id == f"episode-{session.dir.name}"
+    assert episode.title == "fix the parser"
+    assert episode.source == "engine"
+    assert episode.content.startswith(
+        "(no compaction)\n\nOutcome (done): fixed the parser"
+    )
+    meta = episode.metadata
+    assert meta["session_dir"] == str(session.dir)
+    assert meta["stop_reason"] == "done"
+    assert meta["prompts"] == 1 and meta["turns"] == 2
+    assert meta["blocks"] == []
+    assert meta["ended_at"] >= meta["started_at"]
+    assert records[0]["id"] == episode.id
+    assert records[0]["global_dir"] == str(global_dir.resolve())
+
+
+async def test_compacted_session_episode_carries_its_blocks(session, tmp_path):
+    global_dir = tmp_path / "global"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content="branch one summary"),
+            DummyMessage(content="done"),
+        ]
+    )
+    config = make_runtime_config(
+        policy=ExecutionPolicy(summarize_at_tokens=1),
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=True),
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+    await engine.run("task")
+    await engine.aclose()
+
+    store = HarnessStore(global_dir, scope="global").load()
+    (episode,) = store.list("episode")
+    assert episode.content.startswith("[tier 1 | branch 0 |")
+    assert "branch one summary" in episode.content
+    assert [b["tier"] for b in episode.metadata["blocks"]] == [1]
+    assert episode.version == 1
+
+
+async def test_child_sessions_record_no_episode(session, tmp_path):
+    global_dir = tmp_path / "global"
+    config = make_runtime_config(
+        invocation=InvocationContext(depth=1),
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=True),
+    )
+    engine = RLMEngine(
+        client=DummyClient([]),  # type: ignore
+        session=session,
+        runtime_config=config,
+    )
+    engine._first_prompt = "child task"
+    engine._harness = build_view(local_dir(session.dir), global_dir=global_dir)
+
+    engine._record_episode()
+    engine.close()
+
+    assert HarnessStore(global_dir, scope="global").load().count("episode") == 0

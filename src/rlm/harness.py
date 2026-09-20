@@ -29,11 +29,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
+HarnessKind = Literal["prompt", "memory", "skill", "subagent", "episode"]
 HarnessScope = Literal["local", "global"]
 EntryLayer = Literal["local", "ancestor", "global"]
 
-KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
+KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent", "episode")
+ENGINE_KINDS: frozenset[str] = frozenset({"episode"})
+"""Kinds the engine writes and nothing inside a session may change: an episode is
+another session's record."""
+EPISODE_CONTENT_CHARS = 4_000
 STATE_FILE_NAME = "harness_state.json"
 RESULTS_FILE_NAME = "refinements.jsonl"
 HARNESS_DIR_NAME = "harness"
@@ -565,8 +569,10 @@ class HarnessView:
         return result
 
     def _target(
-        self, global_: bool, id: str | None = None
+        self, kind: HarnessKind | None, global_: bool, id: str | None = None
     ) -> tuple[HarnessStore, str | None]:
+        if kind in ENGINE_KINDS:
+            raise PermissionError(f"{kind} entries are written by the engine")
         layer, bare = _split_layer(id) if id is not None else (None, None)
         if layer == "ancestor":
             raise PermissionError("ancestor harness entries are read-only")
@@ -681,7 +687,7 @@ class HarnessView:
         source: str = "agent",
         global_: bool = False,
     ) -> HarnessEntry:
-        store, bare = self._target(global_, id)
+        store, bare = self._target(kind, global_, id)
         return store.create(
             kind,
             title,
@@ -708,7 +714,7 @@ class HarnessView:
         source: str = "agent",
         global_: bool = False,
     ) -> HarnessEntry:
-        store, bare = self._target(global_, id)
+        store, bare = self._target(kind, global_, id)
         assert bare is not None
         return store.update(
             kind,
@@ -723,7 +729,7 @@ class HarnessView:
         )
 
     def delete(self, kind: HarnessKind, id: str, *, global_: bool = False) -> bool:
-        store, bare = self._target(global_, id)
+        store, bare = self._target(kind, global_, id)
         assert bare is not None
         return store.delete(kind, bare)
 
@@ -737,7 +743,7 @@ class HarnessView:
         id: str | None = None,
         global_: bool = False,
     ) -> RefinementEvent:
-        store, _ = self._target(global_)
+        store, _ = self._target(None, global_)
         return store.record_refinement(
             trigger, changes, evidence=evidence, outcome=outcome, id=id
         )

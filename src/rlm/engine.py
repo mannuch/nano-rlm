@@ -45,6 +45,7 @@ from rlm.compaction import (
 from rlm.config import RuntimeConfig
 from rlm.harness import (
     ANCESTOR_DIRS_ENV,
+    EPISODE_CONTENT_CHARS,
     GLOBAL_DIR_ENV,
     LOCAL_DIR_ENV,
     SKILLS_DIR_ENV,
@@ -331,6 +332,10 @@ class RLMEngine:
         # The latest prompt (ledger index and message), kept verbatim across
         # compaction so the task never has to be reconstructed from a summary.
         self._pinned_prompt: tuple[int, dict] | None = None
+        # What the episode written at close records about this session's task.
+        self._first_prompt: str | None = None
+        self._prompt_count = 0
+        self._started_at = time.time()
 
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
@@ -401,6 +406,9 @@ class RLMEngine:
         self._prompt_kernel_notices = []
         if prompt.strip():
             self._task_text = prompt
+            if message_type != "supervisor_notification":
+                self._first_prompt = self._first_prompt or prompt
+                self._prompt_count += 1
 
         if not self._started:
             try:
@@ -1081,6 +1089,7 @@ class RLMEngine:
                 self._repl = None
         finally:
             if self.session is not None:
+                self._record_episode()
                 if self._has_result:
                     direct_tool_stats = None
                     child_tool_stats = None
@@ -1104,6 +1113,66 @@ class RLMEngine:
                     self._has_result = False
                 else:
                     self.session.close()
+
+    def _record_episode(self) -> None:
+        """Write this root session's episode into the global harness store: the task,
+        the coarsest compaction blocks, the outcome and where the ledger is. The engine
+        only ever inserts (keyed by session id, so a second close rewrites the same
+        entry); nothing inside a session removes episodes. A write failure is logged
+        and never blocks close."""
+        harness = self._harness
+        if (
+            self.depth != 0
+            or not self.harness_config.record_episodes
+            or harness is None
+            or harness.global_ is None
+            or self._first_prompt is None
+        ):
+            return
+        blocks = self._staircase.segments()
+        stop_reason = self._metrics.stop_reason or "closed"
+        answer = self._last_answer if self._has_result else ""
+        content = (
+            (self._staircase.render() or "(no compaction)")
+            + f"\n\nOutcome ({stop_reason}): "
+            + (answer[:1000] or "(no answer)")
+        )
+        session_id = self.session.dir.name
+        try:
+            entry = harness.global_.upsert(
+                "episode",
+                self._first_prompt.strip().splitlines()[0][:80],
+                content[:EPISODE_CONTENT_CHARS],
+                id=f"episode-{session_id}",
+                path="episodes/" + time.strftime("%Y-%m", time.gmtime()),
+                metadata={
+                    "session_dir": str(self.session.dir),
+                    "session_id": session_id,
+                    "stop_reason": stop_reason,
+                    "prompts": self._prompt_count,
+                    "turns": self._turn,
+                    "prompt_tokens": self._total_usage.prompt_tokens,
+                    "completion_tokens": self._total_usage.completion_tokens,
+                    "cwd": self.cwd,
+                    "blocks": [block.to_record() for block in blocks],
+                    "started_at": self._started_at,
+                    "ended_at": time.time(),
+                },
+                source="engine",
+            )
+        except OSError:
+            logger.warning("rlm: could not record the session episode", exc_info=True)
+            return
+        try:
+            self.session.log(
+                {
+                    "type": "episode",
+                    "id": entry.id,
+                    "global_dir": str(harness.global_.dir),
+                }
+            )
+        except (OSError, RuntimeError):
+            logger.warning("rlm: could not log the session episode", exc_info=True)
 
     def _programmatic_tool_call_stats(
         self,
@@ -1610,6 +1679,7 @@ class RLMEngine:
                 "max_refinements": self.harness_config.max_refinements,
                 "max_refinement_attempts": self.harness_config.max_refinement_attempts,
                 "harness_skills_dir": self._skills_dir is not None,
+                "record_episodes": self.harness_config.record_episodes,
             },
             "harness": self._harness.counts() if self._harness is not None else None,
             "semantic_edges": self._semantic_edges.snapshot(),

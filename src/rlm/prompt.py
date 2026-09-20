@@ -332,6 +332,10 @@ content, reference={"type": "python", "import": "<module>", "callable": "run",
 importable module; `h.create_subagent(title, content)` for a reusable delegation role.
 `update_*(id, title, content)` and `delete_*(id)` edit existing entries; pass `global_=True`
 to write the global store when one is configured. Ancestor entries cannot be edited.
+`episode` entries are past sessions written by the engine at session close: `h.search(query,
+kind="episode")`, then `history(session_dir=h.get("episode", id).metadata["session_dir"])`
+and its `.blocks` / `.expand(i)` for that session's trajectory. They are read-only: nothing
+in a session removes them.
 `await rlm.refine.run(instructions=None, global_=False)` asks the runtime to review this
 conversation and apply small, evidence-backed harness edits itself; it returns at once and
 the pass runs at the next model-call boundary, after which a `<runtime_event

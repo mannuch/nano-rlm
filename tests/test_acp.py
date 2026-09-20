@@ -167,6 +167,7 @@ class _Engine:
                 "max_refinements": None,
                 "max_refinement_attempts": 3,
                 "harness_skills_dir": False,
+                "record_episodes": False,
             },
             "harness": None,
             "semantic_edges": {"edges": []},

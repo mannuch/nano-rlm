@@ -368,7 +368,8 @@ These artifacts are consumable for debugging, visualization, or training-data ex
 The continual harness is durable state that supplements the immutable system prompt: `prompt`
 notes (narrow behavioural policies), `memory` entries (facts, decisions, failures), `skill`
 entries (descriptions of how to call an importable module, with a `reference` and an
-`arguments` contract) and `subagent` specs (reusable delegation roles). Each agent's local
+`arguments` contract), `subagent` specs (reusable delegation roles) and, in a global store,
+`episode` records of past sessions written by the engine (see [Episodes](#episodes)). Each agent's local
 store lives at `<session>/harness/harness_state.json`. A child reads its ancestors' local
 stores read-only alongside its own. The contract's `harness` object controls the feature:
 
@@ -384,7 +385,8 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
   "max_refinement_attempts": 3,
-  "skills_dir": null
+  "skills_dir": null,
+  "record_episodes": false
 }
 ```
 
@@ -497,7 +499,13 @@ Three triggers, all of which run between model calls and never inside a cell:
 - **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
   work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
   review call decides whether the trajectory holds evidence worth persisting; only an
-  approving review triggers a plan.
+  approving review triggers a plan. After a compaction the review also receives the blocks
+  that compaction produced (the branch summary and any rollups it sealed) as a
+  `<compaction_blocks>` section, with the hint that a failure, tactic or fact recurring
+  across blocks is evidence for a durable entry while one branch's progress is not; an
+  approved review hands the same blocks to the plan as `<evidence>`. Both are side calls
+  with `tool_choice="none"`, so the evidence is the block text itself, never a pointer to
+  follow. The `refinement_review` ledger record lists the block keys.
 
 `max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
 unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
@@ -506,6 +514,37 @@ reported as failed in the conversation and the run continues. Plan and review ca
 becomes the source of a `refinement` edge into the next work request, which also keeps its
 ordinary `continuation` edge. Refinement counts and edit totals appear in the session
 metrics; the `session-v1` snapshot carries per-scope entry counts under `harness`.
+
+### Episodes
+
+Trajectories are per agent directory and there is no global trajectory: `$RLM_HOME` is only
+the default parent of `sessions/<id>/`, and no session discovers or reads another unless
+it is handed a path. Episodes are the opt-in episodic half of cross-session memory, next to
+the semantic entries above. With `record_episodes: true` **and** a `global_dir`, the root
+engine writes one `episode` entry into the global store when the session closes, without
+any model call:
+
+- `title`: the first line of the first prompt; `path`: `episodes/<YYYY-MM>`.
+- `content`: the compaction staircase as it stood at close (the coarsest blocks, or
+  `(no compaction)` for a session that fit one window) followed by `Outcome (<stop_reason>):
+  <answer>`.
+- `metadata`: `session_dir`, `session_id`, `stop_reason`, `prompts`, `turns`, token
+  totals, `cwd`, the block records, and start/end times.
+
+The entry is keyed by session id, so closing twice rewrites the same record. The system
+prompt lists episodes like any other kind, ranked against the task text when there are more
+than `max_prompt_entries_per_kind`; from the kernel, `h.search(query, kind="episode")` finds
+one and `history(session_dir=h.get("episode", id).metadata["session_dir"])` opens its ledger
+for `.blocks` / `.expand(i)`. Each session also logs an `episode` record naming what it
+published.
+
+Episodes are engine-owned: `create`/`update`/`delete` of that kind raise `PermissionError`
+from the kernel API and refinement edits of that kind are rejected, so nothing inside a
+session can rewrite or remove another session's record. The engine never deletes them
+either — a per-session setting must not prune a shared store — so trimming a long-lived
+store is an operator action. Both gates default to off because a global store shared
+across RL rollouts of one task would let a rollout read another's outcome. A store that
+holds episodes cannot be read by builds that predate the kind.
 
 ## Skills
 

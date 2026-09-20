@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from rlm.harness import (
+    ENGINE_KINDS,
     KINDS,
     HarnessEntry,
     HarnessKind,
@@ -49,6 +50,8 @@ Components:
 - subagent: a reusable delegation spec (purpose, instructions, when to invoke). Include the
   call form: compose a concise task prompt and `child = await rlm.agent.spawn(task,
   name="worker")`; collect the answer with `await child.result()`.
+- episode: a past session's record, written by the engine at session close. Read-only:
+  never propose edits of this kind.
 
 Scope and persistence policy:
 - %(scope_policy)s
@@ -382,6 +385,8 @@ def validate_edit(
         return f"unsupported action {edit.action!r}"
     if edit.kind not in KINDS:
         return f"unsupported kind {edit.kind!r}"
+    if edit.kind in ENGINE_KINDS:
+        return f"{edit.kind} entries are written by the engine"
     if edit.kind == "prompt" and entry_id == "base_system_prompt":
         return "base system prompt is not editable"
     if edit.action != "create" and not edit.id:
