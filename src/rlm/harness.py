@@ -38,6 +38,8 @@ ENGINE_KINDS: frozenset[str] = frozenset({"episode"})
 """Kinds the engine writes and nothing inside a session may change: an episode is
 another session's record."""
 EPISODE_CONTENT_CHARS = 4_000
+EPISODE_PROMPTS = 10
+"""Prompt lines listed in an episode's content; the metadata keeps them all."""
 STATE_FILE_NAME = "harness_state.json"
 RESULTS_FILE_NAME = "refinements.jsonl"
 HARNESS_DIR_NAME = "harness"

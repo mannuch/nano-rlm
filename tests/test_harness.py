@@ -566,13 +566,14 @@ async def test_root_session_records_an_episode_at_close(session, tmp_path, recor
     assert episode.id == f"episode-{session.dir.name}"
     assert episode.title == "fix the parser"
     assert episode.source == "engine"
-    assert episode.content.startswith(
-        "(no compaction)\n\nOutcome (done): fixed the parser"
+    assert episode.content == (
+        "Prompts (1):\n1. fix the parser\n\n(no compaction)\n\n"
+        "Outcome (done): fixed the parser"
     )
     meta = episode.metadata
     assert meta["session_dir"] == str(session.dir)
     assert meta["stop_reason"] == "done"
-    assert meta["prompts"] == 1 and meta["turns"] == 2
+    assert meta["prompts"] == ["fix the parser"] and meta["turns"] == 2
     assert meta["blocks"] == []
     assert meta["ended_at"] >= meta["started_at"]
     assert records[0]["id"] == episode.id
@@ -598,7 +599,7 @@ async def test_compacted_session_episode_carries_its_blocks(session, tmp_path):
 
     store = HarnessStore(global_dir, scope="global").load()
     (episode,) = store.list("episode")
-    assert episode.content.startswith("[tier 1 | branch 0 |")
+    assert "\n\n[tier 1 | branch 0 |" in episode.content
     assert "branch one summary" in episode.content
     assert [b["tier"] for b in episode.metadata["blocks"]] == [1]
     assert episode.version == 1
@@ -615,10 +616,41 @@ async def test_child_sessions_record_no_episode(session, tmp_path):
         session=session,
         runtime_config=config,
     )
-    engine._first_prompt = "child task"
+    engine._prompt_lines = ["child task"]
     engine._harness = build_view(local_dir(session.dir), global_dir=global_dir)
 
     engine._record_episode()
     engine.close()
 
     assert HarnessStore(global_dir, scope="global").load().count("episode") == 0
+
+
+async def test_multi_prompt_episode_lists_every_prompt(session, tmp_path):
+    global_dir = tmp_path / "global"
+    answers = [DummyMessage(content=f"answer {i}") for i in range(12)]
+    config = make_runtime_config(
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=True)
+    )
+    engine = RLMEngine(
+        client=DummyClient(answers), session=session, runtime_config=config
+    )  # type: ignore
+    try:
+        for i in range(12):
+            await engine.prompt(f"step {i}\ndetails")
+    finally:
+        await engine.aclose()
+
+    (episode,) = HarnessStore(global_dir, scope="global").load().list("episode")
+    assert episode.title == "step 0"
+    assert episode.content.startswith(
+        "Prompts (12):\n1. step 0\n2. step 1\n"
+        + "".join(f"{i + 1}. step {i}\n" for i in range(2, 10))
+        + "... +2 more\n\n(no compaction)\n\nOutcome (done): answer 11"
+    )
+    assert episode.metadata["prompts"] == [f"step {i}" for i in range(12)]
+    assert [
+        e.id
+        for e in build_view(local_dir(tmp_path), global_dir=global_dir).search(
+            "step 7", kind="episode"
+        )
+    ] == [episode.id]

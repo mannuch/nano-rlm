@@ -525,11 +525,12 @@ engine writes one `episode` entry into the global store when the session closes,
 any model call:
 
 - `title`: the first line of the first prompt; `path`: `episodes/<YYYY-MM>`.
-- `content`: the compaction staircase as it stood at close (the coarsest blocks, or
-  `(no compaction)` for a session that fit one window) followed by `Outcome (<stop_reason>):
-  <answer>`.
-- `metadata`: `session_dir`, `session_id`, `stop_reason`, `prompts`, `turns`, token
-  totals, `cwd`, the block records, and start/end times.
+- `content`: `Prompts (n):` with the first line of every prompt (the first ten listed,
+  the rest counted), then the compaction staircase as it stood at close (the coarsest
+  blocks, or `(no compaction)` for a session that fit one window), then
+  `Outcome (<stop_reason>): <answer>` for the last prompt.
+- `metadata`: `session_dir`, `session_id`, `stop_reason`, every prompt line under
+  `prompts`, `turns`, token totals, `cwd`, the block records, and start/end times.
 
 The entry is keyed by session id, so closing twice rewrites the same record. The system
 prompt lists episodes like any other kind, ranked against the task text when there are more

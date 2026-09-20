@@ -46,6 +46,7 @@ from rlm.config import RuntimeConfig
 from rlm.harness import (
     ANCESTOR_DIRS_ENV,
     EPISODE_CONTENT_CHARS,
+    EPISODE_PROMPTS,
     GLOBAL_DIR_ENV,
     LOCAL_DIR_ENV,
     SKILLS_DIR_ENV,
@@ -332,9 +333,8 @@ class RLMEngine:
         # The latest prompt (ledger index and message), kept verbatim across
         # compaction so the task never has to be reconstructed from a summary.
         self._pinned_prompt: tuple[int, dict] | None = None
-        # What the episode written at close records about this session's task.
-        self._first_prompt: str | None = None
-        self._prompt_count = 0
+        # The first line of every prompt, for the episode written at close.
+        self._prompt_lines: list[str] = []
         self._started_at = time.time()
 
         self._active_tools: list[BuiltinTool] = []
@@ -407,8 +407,7 @@ class RLMEngine:
         if prompt.strip():
             self._task_text = prompt
             if message_type != "supervisor_notification":
-                self._first_prompt = self._first_prompt or prompt
-                self._prompt_count += 1
+                self._prompt_lines.append(prompt.strip().splitlines()[0][:80])
 
         if not self._started:
             try:
@@ -1115,8 +1114,9 @@ class RLMEngine:
                     self.session.close()
 
     def _record_episode(self) -> None:
-        """Write this root session's episode into the global harness store: the task,
-        the coarsest compaction blocks, the outcome and where the ledger is. The engine
+        """Write this root session's episode into the global harness store: every
+        prompt's first line, the coarsest compaction blocks, the outcome and where the
+        ledger is. The engine
         only ever inserts (keyed by session id, so a second close rewrites the same
         entry); nothing inside a session removes episodes. A write failure is logged
         and never blocks close."""
@@ -1126,14 +1126,21 @@ class RLMEngine:
             or not self.harness_config.record_episodes
             or harness is None
             or harness.global_ is None
-            or self._first_prompt is None
+            or not self._prompt_lines
         ):
             return
         blocks = self._staircase.segments()
         stop_reason = self._metrics.stop_reason or "closed"
         answer = self._last_answer if self._has_result else ""
+        prompts = self._prompt_lines
+        listed = [f"{i}. {line}" for i, line in enumerate(prompts[:EPISODE_PROMPTS], 1)]
+        if len(prompts) > EPISODE_PROMPTS:
+            listed.append(f"... +{len(prompts) - EPISODE_PROMPTS} more")
         content = (
-            (self._staircase.render() or "(no compaction)")
+            f"Prompts ({len(prompts)}):\n"
+            + "\n".join(listed)
+            + "\n\n"
+            + (self._staircase.render() or "(no compaction)")
             + f"\n\nOutcome ({stop_reason}): "
             + (answer[:1000] or "(no answer)")
         )
@@ -1141,7 +1148,7 @@ class RLMEngine:
         try:
             entry = harness.global_.upsert(
                 "episode",
-                self._first_prompt.strip().splitlines()[0][:80],
+                prompts[0],
                 content[:EPISODE_CONTENT_CHARS],
                 id=f"episode-{session_id}",
                 path="episodes/" + time.strftime("%Y-%m", time.gmtime()),
@@ -1149,7 +1156,7 @@ class RLMEngine:
                     "session_dir": str(self.session.dir),
                     "session_id": session_id,
                     "stop_reason": stop_reason,
-                    "prompts": self._prompt_count,
+                    "prompts": list(prompts),
                     "turns": self._turn,
                     "prompt_tokens": self._total_usage.prompt_tokens,
                     "completion_tokens": self._total_usage.completion_tokens,
