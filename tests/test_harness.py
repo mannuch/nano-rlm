@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from conftest import (
@@ -18,6 +19,7 @@ from rlm.engine import RLMEngine
 from rlm.history import read_records
 from rlm.harness import (
     HarnessStore,
+    episode_path,
     build_view,
     harness,
     local_dir,
@@ -574,6 +576,10 @@ async def test_root_session_records_an_episode_at_close(session, tmp_path, recor
     assert meta["session_dir"] == str(session.dir)
     assert meta["stop_reason"] == "done"
     assert meta["prompts"] == ["fix the parser"] and meta["turns"] == 2
+    assert episode.path == episode_path(meta["started_at"], session.dir.name)
+    assert re.fullmatch(
+        r"episodes/\d{4}-\d{2}/\d{2}T\d{6}\.\d{3}-" + session.dir.name, episode.path
+    )
     assert meta["blocks"] == []
     assert meta["ended_at"] >= meta["started_at"]
     assert records[0]["id"] == episode.id
@@ -654,3 +660,18 @@ async def test_multi_prompt_episode_lists_every_prompt(session, tmp_path):
             "step 7", kind="episode"
         )
     ] == [episode.id]
+
+
+def test_episode_paths_sort_chronologically():
+    first = episode_path(1_758_400_000.000, "bbbb")
+    same_ms = episode_path(1_758_400_000.000, "aaaa")
+    later = episode_path(1_758_400_000.001, "aaaa")
+    next_month = episode_path(1_761_000_000.0, "0000")
+    assert first == "episodes/2025-09/20T202640.000-bbbb"
+    assert sorted([next_month, later, first, same_ms]) == [
+        same_ms,
+        first,
+        later,
+        next_month,
+    ]
+    assert next_month.startswith("episodes/2025-10/")

@@ -524,7 +524,9 @@ the semantic entries above. With `record_episodes: true` **and** a `global_dir`,
 engine writes one `episode` entry into the global store when the session closes, without
 any model call:
 
-- `title`: the first line of the first prompt; `path`: `episodes/<YYYY-MM>`.
+- `title`: the first line of the first prompt; `path`:
+  `episodes/<YYYY-MM>/<DD>T<HHMMSS.mmm>-<session id>` from the session's start time, so
+  episodes list chronologically within the kind and a month or day is a searchable term.
 - `content`: `Prompts (n):` with the first line of every prompt (the first ten listed,
   the rest counted), then the compaction staircase as it stood at close (the coarsest
   blocks, or `(no compaction)` for a session that fit one window), then

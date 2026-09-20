@@ -52,6 +52,7 @@ from rlm.harness import (
     SKILLS_DIR_ENV,
     HarnessView,
     build_view,
+    episode_path,
     local_dir,
 )
 from rlm.semantic import Compaction, SemanticEdgeTracker
@@ -1151,7 +1152,7 @@ class RLMEngine:
                 prompts[0],
                 content[:EPISODE_CONTENT_CHARS],
                 id=f"episode-{session_id}",
-                path="episodes/" + time.strftime("%Y-%m", time.gmtime()),
+                path=episode_path(self._started_at, session_id),
                 metadata={
                     "session_dir": str(self.session.dir),
                     "session_id": session_id,

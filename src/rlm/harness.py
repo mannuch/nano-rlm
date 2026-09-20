@@ -40,6 +40,19 @@ another session's record."""
 EPISODE_CONTENT_CHARS = 4_000
 EPISODE_PROMPTS = 10
 """Prompt lines listed in an episode's content; the metadata keeps them all."""
+
+
+def episode_path(started_at: float, session_id: str) -> str:
+    """``episodes/<YYYY-MM>/<DD>T<HHMMSS.mmm>-<session id>``: sorts chronologically to
+    the millisecond as a plain string (``list`` orders by path within a kind), the
+    session id breaks ties, and a month or day is still a searchable term."""
+    stamp = datetime.fromtimestamp(started_at, timezone.utc)
+    return (
+        f"episodes/{stamp:%Y-%m}/{stamp:%dT%H%M%S}.{stamp.microsecond // 1000:03d}"
+        f"-{session_id}"
+    )
+
+
 STATE_FILE_NAME = "harness_state.json"
 RESULTS_FILE_NAME = "refinements.jsonl"
 HARNESS_DIR_NAME = "harness"
