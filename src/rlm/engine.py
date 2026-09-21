@@ -27,9 +27,6 @@ from rlm.client import (
 )
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
-    CHECKPOINT_PROMPT,
-    ROLLUP_PROMPT,
-    STAIRCASE_FRAMING,
     TOOL_OUTPUT_MAX_BYTES,
     PINNED_PROMPT_NOTE,
     CompactionFailed,
@@ -57,7 +54,7 @@ from rlm.harness import (
 )
 from rlm.semantic import Compaction, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
-from rlm.prompt import build_system_prompt, render_harness
+from rlm.prompt import build_system_prompt, render_harness, resolve_prompts
 from rlm.refinement import (
     RefinementFailed,
     RefinementRejected,
@@ -257,6 +254,7 @@ class RLMEngine:
         self.compaction_prompt_tokens = config.policy.compaction_prompt_tokens
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt
+        self.prompts = resolve_prompts(config.prompt_overrides)
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
@@ -1381,7 +1379,7 @@ class RLMEngine:
             dropped_chars -= _count_messages_chars([pinned[1]])
         turns_since_last = turn + 1 - self._branch_start_turn
 
-        checkpoint_prompt = CHECKPOINT_PROMPT
+        checkpoint_prompt = self.prompts["checkpoint"]
         if pinned is not None:
             checkpoint_prompt += (
                 "\n\nThe current request remains in context verbatim after compaction:"
@@ -1431,7 +1429,7 @@ class RLMEngine:
 
         system_msg = messages[0]
         self._last_handoff_summary = summary_text
-        framing = STAIRCASE_FRAMING
+        framing = self.prompts["staircase_framing"]
         if pinned is not None:
             framing += " " + PINNED_PROMPT_NOTE
         elif (
@@ -1576,7 +1574,7 @@ class RLMEngine:
                     self.session.messages[0],
                     {
                         "role": "user",
-                        "content": ROLLUP_PROMPT
+                        "content": self.prompts["rollup"]
                         + "\n\n".join(
                             f"{child.header()}\n{child.summary}" for child in children
                         ),
@@ -1688,6 +1686,7 @@ class RLMEngine:
                 "max_refinement_attempts": self.harness_config.max_refinement_attempts,
                 "harness_skills_dir": self._skills_dir is not None,
                 "record_episodes": self.harness_config.record_episodes,
+                "prompt_overrides": sorted(self.runtime_config.prompt_overrides),
             },
             "harness": self._harness.counts() if self._harness is not None else None,
             "semantic_edges": self._semantic_edges.snapshot(),
@@ -1742,6 +1741,7 @@ class RLMEngine:
             trigger=reason,
             turns_since_review=turns,
             blocks=blocks,
+            template=self.prompts["review"],
         )
         try:
             response, _ = await self._call_model(
@@ -1842,6 +1842,7 @@ class RLMEngine:
                     instructions=instructions,
                     importable_names=sorted(importable),
                     evidence=evidence,
+                    template=self.prompts["refine"],
                 )
                 proposal = None
                 base = self.session.messages
@@ -1982,6 +1983,7 @@ class RLMEngine:
             has_ipython=has_ipython,
             can_delegate=has_ipython and self.depth < self.max_depth,
             skills_dir=self._skills_dir,
+            prompts=self.prompts,
         )
 
     def _load_system_prompt(
@@ -2005,6 +2007,7 @@ class RLMEngine:
             if self._supervisor
             else None,
             harness_block=self._harness_block(task_text),
+            prompts=self.prompts,
         )
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:

@@ -39,7 +39,7 @@ from acp.schema import (
     TextContentBlock,
     Usage,
 )
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from rlm.engine import RLMEngine
 from rlm.config import (
@@ -48,6 +48,7 @@ from rlm.config import (
     InvocationContext,
     ProviderConfig,
     RuntimeConfig,
+    validate_prompt_overrides,
 )
 from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
 from rlm.session import Session
@@ -79,6 +80,12 @@ class _RuntimeMetadata(_ContractModel):
     kernel_env: dict[str, str]
     search_api_key: str | None
     harness: HarnessConfig | None = None
+    prompt_overrides: dict[str, str] | None = None
+
+    @field_validator("prompt_overrides")
+    @classmethod
+    def _known_prompts(cls, overrides: dict[str, str] | None) -> dict[str, str] | None:
+        return None if overrides is None else validate_prompt_overrides(overrides)
 
 
 class _UsageSnapshot(_ContractModel):
@@ -121,6 +128,7 @@ class _LimitsSnapshot(_ContractModel):
     max_refinement_attempts: int = Field(gt=0)
     harness_skills_dir: bool
     record_episodes: bool
+    prompt_overrides: list[str]
 
 
 class _SemanticEdge(_ContractModel):
@@ -249,6 +257,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,
             harness=payload.harness or HarnessConfig(),
+            prompt_overrides=payload.prompt_overrides or {},
         ),
         payload.session_id,
     )

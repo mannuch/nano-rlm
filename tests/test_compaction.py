@@ -129,11 +129,13 @@ def _config(
     compaction_fanout: int = 5,
     compaction_tail_tokens: int = 12_000,
     compaction_prompt_tokens: int = 4_000,
+    prompt_overrides: dict[str, str] | None = None,
 ):
     return RuntimeConfig(
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
         invocation=InvocationContext(),
+        prompt_overrides=prompt_overrides or {},
         policy=ExecutionPolicy(
             max_depth=max_depth,
             max_concurrent_subagents=max(4, max_depth),
@@ -409,7 +411,8 @@ async def test_tool_result_overflow_compacts_and_retries(session):
 
 
 async def test_overflow_recovers_without_discovered_threshold(session):
-    """Reactive compaction works when the provider advertises no context window."""
+    """Reactive compaction works when the provider advertises no context window, and
+    the summary request uses the configured checkpoint prompt."""
     client = _ScriptedClient(
         [
             _response(
@@ -427,7 +430,9 @@ async def test_overflow_recovers_without_discovered_threshold(session):
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(),
+        runtime_config=_config(
+            prompt_overrides={"checkpoint": "CUSTOM CHECKPOINT INSTRUCTIONS"}
+        ),
     )
 
     try:
@@ -438,6 +443,9 @@ async def test_overflow_recovers_without_discovered_threshold(session):
     assert engine.summarize_at_tokens is None
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
+    summary_request = client.calls[3]["messages"][-1]["content"]
+    assert summary_request.startswith("CUSTOM CHECKPOINT INSTRUCTIONS")
+    assert engine.execution_snapshot()["limits"]["prompt_overrides"] == ["checkpoint"]
 
 
 async def test_context_overflow_propagates_when_compaction_is_disabled(session):

@@ -7,11 +7,13 @@ from dataclasses import dataclass
 import pytest
 
 from rlm.prompt import (
+    DEFAULT_PROMPTS,
     EDIT_SKILL_PROMPT,
     GIT_HISTORY_GUARD_PROMPT,
     IPYTHON_CONTROL_PROMPT,
     SEARCH_SKILL_PROMPT,
     build_system_prompt,
+    resolve_prompts,
 )
 
 
@@ -34,6 +36,34 @@ def _prompt(
         allow_git=allow_git,
         active_tools=active_tools,
     )
+
+
+def test_prompt_overrides_replace_registry_texts():
+    prompt = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=True,
+        allow_git=True,
+        active_tools=[_Tool("ipython")],
+        prompts=resolve_prompts(
+            {
+                "task": "CUSTOM TASK LINE",
+                "repl_doctrine": "CUSTOM REPL DOCTRINE",
+                "delegation_doctrine": "CUSTOM DELEGATION DOCTRINE",
+            }
+        ),
+    )
+
+    assert prompt.startswith("CUSTOM TASK LINE")
+    assert "## Runtime and ownership" in prompt
+    assert "CUSTOM REPL DOCTRINE" in prompt
+    assert "Python is your orchestration language" not in prompt
+    assert "## Delegation\nCUSTOM DELEGATION DOCTRINE" in prompt
+    assert "<repl_doctrine>" not in prompt and "<delegation_doctrine>" not in prompt
+    default = _prompt([_Tool("ipython")])
+    assert default.startswith(DEFAULT_PROMPTS["task"])
+    assert DEFAULT_PROMPTS["repl_doctrine"] in default
 
 
 def test_git_history_guard_prompt_included_for_shell_tools():

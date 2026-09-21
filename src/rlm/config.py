@@ -144,6 +144,24 @@ class ExecutionPolicy(_ConfigModel):
         return self
 
 
+def validate_prompt_overrides(overrides: dict[str, str]) -> dict[str, str]:
+    """Check override names against ``rlm.prompt.DEFAULT_PROMPTS`` and that each text
+    keeps the markers the runtime fills in."""
+    from rlm.prompt import DEFAULT_PROMPTS, REQUIRED_PROMPT_MARKERS
+
+    for name, text in overrides.items():
+        if name not in DEFAULT_PROMPTS:
+            raise ValueError(
+                f"unknown prompt {name!r}; overridable prompts: {sorted(DEFAULT_PROMPTS)}"
+            )
+        if not text.strip():
+            raise ValueError(f"prompt override {name!r} is empty")
+        missing = [m for m in REQUIRED_PROMPT_MARKERS.get(name, ()) if m not in text]
+        if missing:
+            raise ValueError(f"prompt override {name!r} must contain {missing}")
+    return overrides
+
+
 class RuntimeConfig(_ConfigModel):
     """Configuration resolved once at an RLM process boundary."""
 
@@ -162,6 +180,14 @@ class RuntimeConfig(_ConfigModel):
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     search_api_key: str | None = Field(default=None, repr=False)
     harness: HarnessConfig = HarnessConfig()
+    prompt_overrides: dict[str, str] = Field(default_factory=dict)
+    """Replacement texts for named runtime prompts (see ``rlm.prompt.DEFAULT_PROMPTS``),
+    applied to every engine in the tree."""
+
+    @field_validator("prompt_overrides")
+    @classmethod
+    def _known_prompts(cls, overrides: dict[str, str]) -> dict[str, str]:
+        return validate_prompt_overrides(overrides)
 
     @property
     def resolved_append_to_system_prompt(self) -> str | None:
