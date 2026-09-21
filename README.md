@@ -21,14 +21,16 @@ source .venv/bin/activate
 
 ## CLI
 
-rlm runs exclusively as an [Agent Client Protocol](https://agentclientprotocol.com/) agent:
+rlm runs as an [Agent Client Protocol](https://agentclientprotocol.com/) agent:
 
 ```bash
 rlm --acp
 ```
 
 There is no standalone prompt mode: every session is created by an ACP client that
-supplies the full runtime configuration (see below). Skill CLIs provided by the host
+supplies the full runtime configuration (see below). The only other commands are
+operator utilities for a harness store that never run inside a session, such as
+`rlm harness prune` (see [Episodes](#episodes)). Skill CLIs provided by the host
 environment are on `$PATH` inside the kernel (e.g. `websearch --queries "..."` when
 the `websearch` skill is installed).
 
@@ -590,7 +592,19 @@ Episodes are engine-owned: `create`/`update`/`delete` of that kind raise `Permis
 from the kernel API and refinement edits of that kind are rejected, so nothing inside a
 session can rewrite or remove another session's record. The engine never deletes them
 either — a per-session setting must not prune a shared store — so trimming a long-lived
-store is an operator action. Both gates default to off because a global store shared
+store is an operator command run outside any session:
+
+```bash
+rlm harness prune --global-dir ~/.rlm/global --older-than 30d          # dry run
+rlm harness prune --global-dir ~/.rlm/global --older-than 30d --keep 200 --apply
+```
+
+`--older-than` (`30d`, `12h`, `4w`) selects by the session's start time and `--keep N`
+drops everything beyond the N newest; without `--apply` the command only prints what would
+go. `--global-dir` defaults to `$RLM_HARNESS_GLOBAL_DIR`. The removal runs under the store
+lock and is recorded like a refinement — an `operator:prune` event in `harness_state.json`
+and a result in `refinements.jsonl` with each removed entry's snapshot — so it is
+inspectable and reversible by hand, while no in-session path can recreate an episode. Both gates default to off because a global store shared
 across RL rollouts of one task would let a rollout read another's outcome. A store that
 holds episodes cannot be read by builds that predate the kind.
 
