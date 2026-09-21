@@ -755,7 +755,8 @@ uv run python scripts/gepa/tasks.py --repo nano-rlm=<path> --repo click=<path> \
     --out scripts/gepa/tasks.jsonl --per-repo 20
 RLM_API_KEY=... RLM_BASE_URL=... uv run --group gepa python scripts/gepa/optimize.py \
     --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
-    --model openai/gpt-4.1-mini --reflection-model <strong model> --max-metric-calls 300
+    --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
+    --max-metric-calls 300
 ```
 
 The first run optimizes `task`, `repl_doctrine`, `delegation_doctrine`, `checkpoint`,

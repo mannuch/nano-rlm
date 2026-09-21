@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Share of tasks held out for validation (split by task id)",
     )
     parser.add_argument(
-        "--model", default=os.environ.get("RLM_MODEL", "openai/gpt-4.1-mini")
+        "--model", default=os.environ.get("RLM_MODEL", "deepseek/deepseek-v4.1-flash")
     )
     parser.add_argument("--base-url", default=os.environ.get("RLM_BASE_URL"))
     parser.add_argument("--reflection-model", required=True)
