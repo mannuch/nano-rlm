@@ -356,7 +356,8 @@ the default: task progress, temporary blockers, session-specific facts. Global e
 only for stable cross-session lessons, durable user preferences, reusable skills and
 sub-agent specs, or facts explicitly qualified by project."""
 
-HARNESS_API_PROMPT = """`h = rlm.harness.harness()` is the synchronous Python API (pre-imported). Read with
+HARNESS_API_PROMPT = """`rlm.harness` is pre-imported; `h = rlm.harness.harness()` builds the synchronous
+Python API (`h` is not predefined, bind it yourself in a cell). Read with
 `h.overview()`, `h.search("query", kind=None)`, `h.list(kind)` and `h.get(kind, id)` (ids
 exactly as shown: `local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting component:
 `h.create_memory(title, content)` for facts, decisions and failures;
