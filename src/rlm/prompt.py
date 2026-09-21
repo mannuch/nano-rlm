@@ -322,14 +322,15 @@ lines below are compact summaries used as routing hints, not full descriptions. 
 system prompt is immutable; prompt entries are supplemental notes only."""
 
 HARNESS_API_PROMPT = """`h = rlm.harness.harness()` is the synchronous Python API (pre-imported). Read with
-`h.overview()`, `h.search("query", kind=None)` and `h.get(kind, id)` (ids exactly as shown:
-`local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting component:
+`h.overview()`, `h.search("query", kind=None)`, `h.list(kind)` and `h.get(kind, id)` (ids
+exactly as shown: `local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting component:
 `h.create_memory(title, content)` for facts, decisions and failures;
 `h.create_prompt_note(title, content)` for a narrow policy; `h.create_skill(title,
 content, reference={...}, arguments={...})` to describe an importable module;
 `h.create_subagent(title, content)` for a delegation role. `help(h)` documents
 `update_*`/`delete_*`, `global_=True`, the skill payload contract and `episode` entries
-(past sessions: `h.get("episode", id).metadata["session_dir"]` opens one with `history`).
+(past sessions: `h.list("episode")` finds them and
+`h.get("episode", id).metadata["session_dir"]` opens one with `history`).
 `await rlm.refine.run(instructions=None, global_=False, rollback_id=None)` has the runtime
 review this conversation at the next model-call boundary and apply small evidence-backed
 edits itself, reported in a `<runtime_event kind="refinement">` notice; call it after a

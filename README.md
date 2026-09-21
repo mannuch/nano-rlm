@@ -419,6 +419,7 @@ Inside the kernel, `rlm.harness` is the synchronous Python API:
 h = rlm.harness.harness()                      # the view this agent sees
 print(h.overview())
 h.search("pytest venv")                        # ranked by term overlap
+h.list("episode")                              # every visible entry of one kind
 h.get("memory", "ancestor:parent_lesson")      # ids exactly as displayed
 h.create_memory("Project venv", "run tests with ./.venv/bin/python -m pytest")
 h.create_skill("Release lookup", "query websearch with '<pkg> release'",
@@ -583,9 +584,10 @@ any model call:
 
 The entry is keyed by session id, so closing twice rewrites the same record. The system
 prompt lists episodes like any other kind, ranked against the task text when there are more
-than `max_prompt_entries_per_kind`; from the kernel, `h.search(query, kind="episode")` finds
-one and `history(session_dir=h.get("episode", id).metadata["session_dir"])` opens its ledger
-for `.blocks` / `.expand(i)`. Each session also logs an `episode` record naming what it
+than `max_prompt_entries_per_kind`; from the kernel, `h.list("episode")` lists them,
+`h.search(query, kind="episode")` ranks them (an empty query returns the newest), and
+`history(session_dir=h.get("episode", id).metadata["session_dir"])` opens its ledger for
+`.blocks` / `.expand(i)`. Each session also logs an `episode` record naming what it
 published.
 
 Episodes are engine-owned: `create`/`update`/`delete` of that kind raise `PermissionError`
