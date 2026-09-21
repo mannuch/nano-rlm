@@ -755,6 +755,7 @@ class HarnessView:
 
         Args:
             query: Free text; matches are scored on title, content, path and id.
+                An empty query returns the most recently updated entries instead.
             kind: Restrict to one kind, e.g. ``"episode"`` for past sessions.
             limit: Maximum entries returned (best first).
         """
@@ -762,7 +763,8 @@ class HarnessView:
             raise TypeError("limit must be a positive int")
         terms = query_terms(query)
         if not terms:
-            return []
+            newest = sorted(self.list(kind), key=lambda e: e.updated_at, reverse=True)
+            return newest[:limit]
         scored = [(score_entry(e, terms), e) for e in self.list(kind)]
         ranked = sorted(
             (item for item in scored if item[0] > 0),

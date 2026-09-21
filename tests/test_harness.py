@@ -154,7 +154,12 @@ def test_query_terms_and_search_ranking(tmp_path):
     ranked = [e.id for e in view.search("pytest venv")]
     assert ranked[0] == "pytest_venv"
     assert set(ranked) == {"pytest_venv", "pytest_imports"}
-    assert view.search("") == []
+    assert [e.id for e in view.search("")] == [
+        "pytest_venv",
+        "git_status",
+        "pytest_imports",
+    ]
+    assert [e.id for e in view.search("", limit=1)] == ["pytest_venv"]
     with pytest.raises(TypeError):
         view.search("x", limit=0)
 
