@@ -19,6 +19,7 @@ from rlm.engine import RLMEngine
 from rlm.history import read_records
 from rlm.harness import (
     HarnessStore,
+    HarnessView,
     episode_path,
     build_view,
     harness,
@@ -752,3 +753,14 @@ def test_entry_payloads_are_validated_by_kind(tmp_path):
     state.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="invalid skill entry 'search'"):
         HarnessStore(tmp_path / "h").load()
+
+
+def test_view_methods_are_self_documenting():
+    # `help(h)` is the model's reference for everything the prompt leaves out.
+    undocumented = [
+        name
+        for name in dir(HarnessView)
+        if not name.startswith("_")
+        and not (getattr(HarnessView, name).__doc__ or "").strip()
+    ]
+    assert undocumented == []

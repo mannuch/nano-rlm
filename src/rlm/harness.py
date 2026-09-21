@@ -700,6 +700,8 @@ class HarnessView:
         self.ancestors = builtins.list(ancestors or [])
 
     def layers(self) -> builtins.list[tuple[EntryLayer, HarnessStore]]:
+        """The visible stores as ``(layer, store)`` pairs: local, then ancestors
+        nearest first, then global. Mostly for the runtime; reads below merge them."""
         result: builtins.list[tuple[EntryLayer, HarnessStore]] = [("local", self.local)]
         result.extend(("ancestor", store) for store in self.ancestors)
         if self.global_ is not None:
@@ -731,9 +733,13 @@ class HarnessView:
         return [(layer, e) for layer, store in self.layers() for e in store.list(kind)]
 
     def list(self, kind: HarnessKind | None = None) -> builtins.list[HarnessEntry]:
+        """Every visible entry, optionally of one ``kind``, local layer first."""
         return [entry for _, entry in self.entries(kind)]
 
     def get(self, kind: HarnessKind, id: str) -> HarnessEntry | None:
+        """One entry by id, or None. ``id`` may carry the layer prefix exactly as
+        displayed (``local:x``, ``ancestor:x``, ``global:x``); a bare id searches the
+        layers in order and returns the first match."""
         layer, bare = _split_layer(id)
         for store_layer, store in self.layers():
             if layer is not None and store_layer != layer:
@@ -745,7 +751,13 @@ class HarnessView:
     def search(
         self, query: str, kind: HarnessKind | None = None, limit: int = 10
     ) -> builtins.list[HarnessEntry]:
-        """Visible entries ranked by weighted term overlap with ``query``."""
+        """Visible entries ranked by weighted term overlap with ``query``.
+
+        Args:
+            query: Free text; matches are scored on title, content, path and id.
+            kind: Restrict to one kind, e.g. ``"episode"`` for past sessions.
+            limit: Maximum entries returned (best first).
+        """
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise TypeError("limit must be a positive int")
         terms = query_terms(query)
@@ -760,12 +772,14 @@ class HarnessView:
         return [entry for _, entry in ranked[:limit]]
 
     def refinements(self) -> builtins.list[RefinementEvent]:
+        """Refinement events recorded in the local and global stores, oldest first."""
         events = self.local.list_refinements()
         if self.global_ is not None:
             events.extend(self.global_.list_refinements())
         return sorted(events, key=lambda e: e.created_at)
 
     def counts(self) -> dict[str, Any]:
+        """Per-kind entry counts by layer, as reported in the session snapshot."""
         return {
             "local": {kind: self.local.count(kind) for kind in KINDS},
             "global": {kind: self.global_.count(kind) for kind in KINDS}
@@ -778,7 +792,8 @@ class HarnessView:
     def overview(
         self, *, max_entries_per_kind: int = 20, max_content_chars: int = 120
     ) -> str:
-        """Human-readable summary of every visible layer."""
+        """Human-readable summary of every visible layer: store paths, per-kind entry
+        lines with their ``[layer:id]`` handles, and recent refinements. Start here."""
         lines = [f"Harness state: local={self.local.path}"]
         if self.ancestors:
             lines.append(
@@ -803,6 +818,7 @@ class HarnessView:
         return "\n".join(lines)
 
     def snapshot(self) -> dict[str, Any]:
+        """Raw state of every layer as JSON-ready dicts; for tooling, not reading."""
         return {
             "local": self.local.snapshot(),
             "ancestors": [store.snapshot() for store in self.ancestors],
@@ -825,6 +841,29 @@ class HarnessView:
         source: str = "agent",
         global_: bool = False,
     ) -> HarnessEntry:
+        """Create an entry of ``kind``; the ``create_*`` helpers below fill ``kind``.
+
+        Args:
+            kind: ``prompt``, ``memory``, ``skill`` or ``subagent`` (``episode`` is
+                written by the engine).
+            title: Short name; the id is a slug of it unless ``id`` is given.
+            content: The note, fact, calling guide or delegation spec itself.
+            id: Explicit id (bare, or ``global:`` prefixed to pick that store).
+            path: Grouping facet shown next to the title, default ``general``.
+            reference: Skills only: ``{"type": "python", "import": "<module>",
+                "callable": "run" | "call_pattern": "await <module>(...)"}``.
+            arguments: Skills only: ``{name: {"type", "required", "default",
+                "description"}}`` for each accepted input (``{}`` if none).
+            metadata: Free-form extras (validated for engine kinds).
+            source: Who wrote it; ``agent`` for kernel calls.
+            global_: Write the shared global store instead of this session's.
+
+        Raises:
+            ValueError: A malformed payload (``reference.import: Field required``)
+                or an existing id.
+            PermissionError: The kind is engine-owned.
+            RuntimeError: ``global_`` without a global store configured.
+        """
         store, bare = self._target(kind, global_, id)
         return store.create(
             kind,
@@ -852,6 +891,10 @@ class HarnessView:
         source: str = "agent",
         global_: bool = False,
     ) -> HarnessEntry:
+        """Replace an entry's title and content, bumping its version. ``path``,
+        ``reference``, ``arguments`` and ``metadata`` are kept unless passed. ``id``
+        accepts the displayed ``local:``/``global:`` prefix; ancestor entries raise
+        ``PermissionError``."""
         store, bare = self._target(kind, global_, id)
         assert bare is not None
         return store.update(
@@ -867,6 +910,8 @@ class HarnessView:
         )
 
     def delete(self, kind: HarnessKind, id: str, *, global_: bool = False) -> bool:
+        """Remove an entry; True if it existed. Same id and permission rules as
+        ``update``."""
         store, bare = self._target(kind, global_, id)
         assert bare is not None
         return store.delete(kind, bare)
@@ -881,6 +926,9 @@ class HarnessView:
         id: str | None = None,
         global_: bool = False,
     ) -> RefinementEvent:
+        """Record that a set of edits was made together and why, so ``overview()`` and
+        later reviews can see the history. The runtime records its own passes; call
+        this after a batch of manual ``create_*``/``update_*`` edits."""
         store, _ = self._target(None, global_)
         return store.record_refinement(
             trigger, changes, evidence=evidence, outcome=outcome, id=id
@@ -889,52 +937,74 @@ class HarnessView:
     # -- per-kind conveniences
 
     def create_memory(self, title: str, content: str, **kwargs: Any) -> HarnessEntry:
+        """A durable fact, decision, failure, preference or outcome. Keyword
+        arguments as for ``create``."""
         return self.create("memory", title, content, **kwargs)
 
     def update_memory(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a memory; see ``update``."""
         return self.update("memory", id, title, content, **kwargs)
 
     def delete_memory(self, id: str, **kwargs: Any) -> bool:
+        """Remove a memory; see ``delete``."""
         return self.delete("memory", id, **kwargs)
 
     def create_prompt_note(
         self, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """A narrow behavioural policy appended to the system prompt (path
+        ``policy`` by default). The base system prompt itself is immutable."""
         kwargs.setdefault("path", "policy")
         return self.create("prompt", title, content, **kwargs)
 
     def update_prompt_note(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a prompt note; see ``update``."""
         return self.update("prompt", id, title, content, **kwargs)
 
     def delete_prompt_note(self, id: str, **kwargs: Any) -> bool:
+        """Remove a prompt note; see ``delete``."""
         return self.delete("prompt", id, **kwargs)
 
     def create_skill(
         self, title: str, content: str, *, reference: dict[str, Any], **kwargs: Any
     ) -> HarnessEntry:
+        """Describe how to call a module that is already importable in the kernel.
+
+        ``reference`` is required: ``{"type": "python", "import": "<module>",
+        "callable": "run", "call_pattern": "await <module>(...)"}``. Pass
+        ``arguments={name: {"type": ..., "required": ..., "description": ...}}`` for
+        the accepted inputs. A skill entry never creates code; see ``create``.
+        """
         return self.create("skill", title, content, reference=reference, **kwargs)
 
     def update_skill(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a skill description; ``reference``/``arguments`` are kept unless
+        passed. See ``update``."""
         return self.update("skill", id, title, content, **kwargs)
 
     def delete_skill(self, id: str, **kwargs: Any) -> bool:
+        """Remove a skill description; see ``delete``."""
         return self.delete("skill", id, **kwargs)
 
     def create_subagent(self, title: str, content: str, **kwargs: Any) -> HarnessEntry:
+        """A reusable delegation role: purpose, instructions and when to invoke it,
+        including the spawn call form. Keyword arguments as for ``create``."""
         return self.create("subagent", title, content, **kwargs)
 
     def update_subagent(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a sub-agent spec; see ``update``."""
         return self.update("subagent", id, title, content, **kwargs)
 
     def delete_subagent(self, id: str, **kwargs: Any) -> bool:
+        """Remove a sub-agent spec; see ``delete``."""
         return self.delete("subagent", id, **kwargs)
 
 

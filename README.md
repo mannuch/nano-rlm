@@ -427,7 +427,8 @@ h.update_memory("project_venv", "Project venv", "...", global_=True)   # needs g
 ```
 
 `update_*`/`delete_*` take the bare id or a `local:`/`global:` prefix; ancestor entries raise
-`PermissionError`. A `skill` entry describes an already-importable module; it is not a
+`PermissionError`. Every method carries a docstring, so `help(h)` (or `help(h.create_skill)`) is
+the full reference; the system prompt only lists the essential calls. A `skill` entry describes an already-importable module; it is not a
 package (see [Skills](#skills) for the on-disk skill contract). Stores are rewritten
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
