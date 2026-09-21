@@ -1,8 +1,8 @@
 """Optimize nano-rlm's prompt texts with GEPA against repo-grounded question sessions.
 
     uv run --group gepa python scripts/gepa/optimize.py --tasks tasks.jsonl \\
-        --run-dir scripts/gepa/runs/first --model openai/gpt-4.1-mini \\
-        --reflection-model anthropic/claude-sonnet-4.5 --max-metric-calls 300
+        --run-dir scripts/gepa/runs/first --model deepseek/deepseek-v4.1-flash \\
+        --reflection-model anthropic/claude-fable-5.1 --max-metric-calls 300
 
 Re-running with the same ``--run-dir`` resumes from ``gepa_state.bin``. The result is a
 ``prompt_overrides`` object (``best_prompt_overrides.json``) plus ``report.md``; landing
