@@ -228,10 +228,11 @@ def refine_prompt(
     instructions: str | None,
     importable_names: list[str],
     evidence: list[Block] | None = None,
+    template: str = REFINE_PROMPT,
 ) -> str:
     """The user message appended to the live conversation for a planning call."""
     parts = [
-        REFINE_PROMPT
+        template
         % {
             "importable": ", ".join(sorted(importable_names)) or "(none)",
             "scope_policy": GLOBAL_SCOPE_POLICY
@@ -255,9 +256,10 @@ def review_prompt(
     trigger: str,
     turns_since_review: int,
     blocks: list[Block] | None = None,
+    template: str = REVIEW_PROMPT,
 ) -> str:
     parts = [
-        REVIEW_PROMPT % {"trigger": trigger, "turns": turns_since_review},
+        template % {"trigger": trigger, "turns": turns_since_review},
         f"<current_harness_state>\n{view.overview(max_entries_per_kind=20)}\n</current_harness_state>",
         f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
     ]

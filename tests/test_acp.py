@@ -168,6 +168,7 @@ class _Engine:
                 "max_refinement_attempts": 3,
                 "harness_skills_dir": False,
                 "record_episodes": False,
+                "prompt_overrides": [],
             },
             "harness": None,
             "semantic_edges": {"edges": []},
@@ -880,6 +881,21 @@ async def test_acp_runtime_contract_carries_harness_config(monkeypatch, tmp_path
             str(tmp_path), **_runtime_metadata(harness={"skills": []})
         )
     assert "harness.skills" in str(rejected.value.data)
+    assert agent._sessions == {}
+
+    created = await agent.new_session(
+        str(tmp_path), **_runtime_metadata(prompt_overrides={"checkpoint": "Sum up."})
+    )
+    assert _Engine.instances[-1].runtime_config.prompt_overrides == {
+        "checkpoint": "Sum up."
+    }
+    await agent.close_session(created.session_id)
+
+    with pytest.raises(RequestError) as rejected:
+        await agent.new_session(
+            str(tmp_path), **_runtime_metadata(prompt_overrides={"bogus": "x"})
+        )
+    assert "prompt_overrides" in str(rejected.value.data)
     assert agent._sessions == {}
 
 

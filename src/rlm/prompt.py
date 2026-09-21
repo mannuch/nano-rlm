@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from collections.abc import Mapping
+
+from rlm.compaction import CHECKPOINT_PROMPT, ROLLUP_PROMPT, STAIRCASE_FRAMING
 from rlm.harness import KINDS, HarnessView, format_entry, query_terms, score_entry
+from rlm.refinement import REFINE_PROMPT, REVIEW_PROMPT
 
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
@@ -97,19 +101,36 @@ BUILTIN_SKILL_PROMPTS: dict[str, str] = {
 }
 
 
-RUNTIME_PROMPT = """## Runtime and ownership
-You have a persistent IPython REPL as your execution environment. Each `ipython` tool call
-runs a cell in the same kernel, so variables, imports, and functions remain available to
-later cells. Use Python to program over tools and coordinate concurrent work.
+TASK_PROMPT = (
+    "You are an agent that uses code to solve tasks. Break the task into sub-tasks, "
+    "write and run code, observe the results, and iterate one step at a time until the "
+    "user's task is complete."
+)
 
-Python is your orchestration language: loops, conditionals, parsing, and state live in
+REPL_DOCTRINE_PROMPT = """Python is your orchestration language: loops, conditionals, parsing, and state live in
 cells, and tool calls are `await` expressions whose results you can bind and compose. Probe
 before you conclude: inspect the inputs (files, outputs, data) and only then plan. Bind
 what you read or search to named variables so you can slice, filter, and revisit it instead
 of re-reading. Cell output enters your context and stays there, so print what the next
 step needs, not whole files or results; summarize or aggregate in Python first. Evaluate an
 external project, dataset, or service through its own interface and use the REPL to drive
-the process and analyze what comes back.
+the process and analyze what comes back."""
+
+DELEGATION_DOCTRINE_PROMPT = """Delegate work that is independent and self-contained: parallel context-heavy research,
+separate implementation tracks, or a sub-problem whose exploration would flood your own
+context. Do a single known lookup, edit, or command inline. Have children leave large
+outputs in files you read selectively; their answers are summaries."""
+
+# Reference sections carry a `<name>` line where the matching doctrine text is inserted.
+REPL_DOCTRINE_SLOT = "<repl_doctrine>"
+DELEGATION_DOCTRINE_SLOT = "<delegation_doctrine>"
+
+RUNTIME_PROMPT = """## Runtime and ownership
+You have a persistent IPython REPL as your execution environment. Each `ipython` tool call
+runs a cell in the same kernel, so variables, imports, and functions remain available to
+later cells. Use Python to program over tools and coordinate concurrent work.
+
+<repl_doctrine>
 
 A supervisor runs outside your IPython kernel. It manages agents, background Bash jobs,
 message delivery, and subscriptions. The pre-imported `rlm` Python API lets you ask it to
@@ -271,10 +292,7 @@ Objects use attributes; inbox events and history messages are dictionaries.
 """
 
 AGENT_PROMPT = """## Delegation
-Delegate work that is independent and self-contained: parallel context-heavy research,
-separate implementation tracks, or a sub-problem whose exploration would flood your own
-context. Do a single known lookup, edit, or command inline. Have children leave large
-outputs in files you read selectively; their answers are summaries.
+<delegation_doctrine>
 
 `child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
 an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
@@ -378,6 +396,36 @@ HARNESS_SPAWN_HINT = (
 )
 
 
+DEFAULT_PROMPTS: dict[str, str] = {
+    "task": TASK_PROMPT,
+    "repl_doctrine": REPL_DOCTRINE_PROMPT,
+    "delegation_doctrine": DELEGATION_DOCTRINE_PROMPT,
+    "runtime_reference": RUNTIME_PROMPT,
+    "delegation_reference": AGENT_PROMPT,
+    "history": HISTORY_PROMPT,
+    "harness_api": HARNESS_API_PROMPT,
+    "checkpoint": CHECKPOINT_PROMPT,
+    "rollup": ROLLUP_PROMPT,
+    "staircase_framing": STAIRCASE_FRAMING,
+    "review": REVIEW_PROMPT,
+    "refine": REFINE_PROMPT,
+}
+"""Every prompt text a runtime contract may override, by name."""
+
+REQUIRED_PROMPT_MARKERS: dict[str, tuple[str, ...]] = {
+    "runtime_reference": (REPL_DOCTRINE_SLOT,),
+    "delegation_reference": (DELEGATION_DOCTRINE_SLOT,),
+    "review": ("%(trigger)s", "%(turns)d"),
+    "refine": ("%(importable)s", "%(scope_policy)s"),
+}
+"""Substrings an override must keep for the runtime to fill it in."""
+
+
+def resolve_prompts(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The prompt texts for one engine: the defaults with ``overrides`` applied."""
+    return {**DEFAULT_PROMPTS, **(overrides or {})}
+
+
 def render_harness(
     view: HarnessView,
     *,
@@ -388,13 +436,15 @@ def render_harness(
     has_ipython: bool = True,
     can_delegate: bool = False,
     skills_dir: str | None = None,
+    prompts: Mapping[str, str] | None = None,
 ) -> str:
     """The harness block for the system prompt: per-kind counts, the most relevant
     entries within the caps, and recent refinement events."""
+    texts = prompts or DEFAULT_PROMPTS
     terms = query_terms(query) if query else []
     lines = [HARNESS_INTRO, ""]
     if has_ipython:
-        lines.extend([HARNESS_API_PROMPT, ""])
+        lines.extend([texts["harness_api"], ""])
         if skills_dir:
             lines.extend([HARNESS_SKILLS_DIR_PROMPT % {"skills_dir": skills_dir}, ""])
     total = 0
@@ -447,19 +497,13 @@ def build_system_prompt(
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
     harness_block: str | None = None,
+    prompts: Mapping[str, str] | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
+    texts = prompts or DEFAULT_PROMPTS
     has_ipython = _has_tool(active_tools, "ipython")
     can_delegate = has_ipython and allow_recursion
-    parts = [
-        task_instructions
-        if task_instructions is not None
-        else (
-            "You are an agent that uses code to solve tasks. Break the task into "
-            "sub-tasks, write and run code, observe the results, and iterate one step "
-            "at a time until the user's task is complete."
-        )
-    ]
+    parts = [task_instructions if task_instructions is not None else texts["task"]]
     if extra_instructions:
         parts.append(extra_instructions)
     parts.append("## Agent context")
@@ -507,14 +551,20 @@ def build_system_prompt(
     if has_ipython:
         parts.extend(
             [
-                RUNTIME_PROMPT,
-                HISTORY_PROMPT,
+                texts["runtime_reference"].replace(
+                    REPL_DOCTRINE_SLOT, texts["repl_doctrine"]
+                ),
+                texts["history"],
                 IPYTHON_CONTROL_PROMPT,
                 KERNEL_PACKAGES_PROMPT,
             ]
         )
         if can_delegate:
-            parts.append(AGENT_PROMPT)
+            parts.append(
+                texts["delegation_reference"].replace(
+                    DELEGATION_DOCTRINE_SLOT, texts["delegation_doctrine"]
+                )
+            )
         else:
             parts.append(
                 "Delegation is disabled at this depth. Work directly with your available tools."

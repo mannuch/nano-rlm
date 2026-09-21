@@ -64,6 +64,29 @@ def test_policy_rejects_unsafe_recursive_values_and_reserved_headers():
         make_client(provider)
 
 
+def test_prompt_overrides_are_validated_against_the_registry():
+    def config(overrides: dict[str, str]) -> RuntimeConfig:
+        return RuntimeConfig(
+            model="m",
+            provider=ProviderConfig(base_url=None, api_key="k"),
+            invocation=InvocationContext(),
+            policy=ExecutionPolicy(),
+            prompt_overrides=overrides,
+        )
+
+    assert config({"checkpoint": "Summarize."}).prompt_overrides == {
+        "checkpoint": "Summarize."
+    }
+    with pytest.raises(ValueError, match="unknown prompt 'bogus'"):
+        config({"bogus": "x"})
+    with pytest.raises(ValueError, match="'task' is empty"):
+        config({"task": "  "})
+    with pytest.raises(ValueError, match=r"'review' must contain \['%\(trigger\)s'"):
+        config({"review": "Decide with %(turns)d turns."})
+    with pytest.raises(ValueError, match="'runtime_reference' must contain"):
+        config({"runtime_reference": "## Runtime\nNo slot for the doctrine."})
+
+
 def test_default_policy_enables_recursion_and_compaction():
     policy = ExecutionPolicy()
     assert policy.compaction is True

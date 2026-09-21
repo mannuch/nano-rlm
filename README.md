@@ -96,6 +96,16 @@ and runtime guide. This keeps tool/API documentation and lifecycle rules availab
 to root agents, persistent children, and leaves. Credentials are not included in
 agent identity metadata.
 
+`prompt_overrides` replaces named runtime texts for every engine in the tree. The names
+are the keys of `rlm.prompt.DEFAULT_PROMPTS`: the system prompt's `task` line and the
+`repl_doctrine` and `delegation_doctrine` paragraphs; the reference sections they sit in
+(`runtime_reference`, `delegation_reference`, `history`, `harness_api`); the compaction
+texts `checkpoint`, `rollup` and `staircase_framing`; and the refinement texts `review`
+and `refine`. Unknown names and empty texts are rejected, as is a text that drops a marker
+the runtime fills in (`<repl_doctrine>` inside `runtime_reference`, `%(trigger)s` in
+`review`, ...). `system_prompt_path` still replaces the task role entirely. The
+`session/close` snapshot lists the overridden names under `limits.prompt_overrides`.
+
 The generated guide distinguishes Python state from supervisor-owned resources,
 shows inbox dictionaries versus handle/metadata objects, and explains waiting,
 completion, history recovery, jobs, and subscriptions. Delegation instructions are
