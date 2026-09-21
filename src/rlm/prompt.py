@@ -102,6 +102,15 @@ You have a persistent IPython REPL as your execution environment. Each `ipython`
 runs a cell in the same kernel, so variables, imports, and functions remain available to
 later cells. Use Python to program over tools and coordinate concurrent work.
 
+Python is your orchestration language: loops, conditionals, parsing, and state live in
+cells, and tool calls are `await` expressions whose results you can bind and compose. Probe
+before you conclude: inspect the inputs (files, outputs, data) and only then plan. Bind
+what you read or search to named variables so you can slice, filter, and revisit it instead
+of re-reading. Cell output enters your context and stays there, so print what the next
+step needs, not whole files or results; summarize or aggregate in Python first. Evaluate an
+external project, dataset, or service through its own interface and use the REPL to drive
+the process and analyze what comes back.
+
 A supervisor runs outside your IPython kernel. It manages agents, background Bash jobs,
 message delivery, and subscriptions. The pre-imported `rlm` Python API lets you ask it to
 create, inspect, and control these resources; execute async API calls with top-level `await`.
@@ -262,6 +271,11 @@ Objects use attributes; inbox events and history messages are dictionaries.
 """
 
 AGENT_PROMPT = """## Delegation
+Delegate work that is independent and self-contained: parallel context-heavy research,
+separate implementation tracks, or a sub-problem whose exploration would flood your own
+context. Do a single known lookup, edit, or command inline. Have children leave large
+outputs in files you read selectively; their answers are summaries.
+
 `child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
 an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
 and an expected result. Names are unique among siblings and reserved for the session.
@@ -297,17 +311,17 @@ report. Read history, then steer if needed; the subscription itself does not dir
 """
 
 HISTORY_PROMPT = """## Conversation history
-`from rlm import history; h = await history()` reads a snapshot of your ledger.
-`h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses
-one within a context window. Indices are zero-based. Messages are dictionaries with
-role/content/tool fields. `h.user_messages()` returns original user inputs, distinct
+`from rlm import history; hist = await history()` reads a snapshot of your ledger.
+`hist.messages[i]` addresses a session-wide message; `hist.windows[w].messages[i]`
+addresses one within a context window. Indices are zero-based. Messages are dictionaries
+with role/content/tool fields. `hist.user_messages()` returns original user inputs, distinct
 from generated summaries and supervisor notices. `history(session_dir=path)` reads an
 explicit session; use `await child.history()` when available. Reload for fresh state.
 
 Compaction and rollback start new windows; earlier records remain addressable. Each
-compaction block names the message, window, and turn ranges it summarizes; `h.blocks`
-lists every block and `h.expand(i)` returns the messages block `i` summarizes. Full
-tool outputs and shortened context versions have separate indices. `h.events` contains spawn and rollback records; prompt_rollback.prompt_id
+compaction block names the message, window, and turn ranges it summarizes; `hist.blocks`
+lists every block and `hist.expand(i)` returns the messages block `i` summarizes. Full
+tool outputs and shortened context versions have separate indices. `hist.events` contains spawn and rollback records; prompt_rollback.prompt_id
 identifies a rolled-back user attempt.
 History records what happened, not proof that side effects were undone. Recover exact
 instructions and evidence by searching/selectively printing records, not the entire ledger.
@@ -319,7 +333,10 @@ Supplemental state that outlives single conversations: prompt notes, memories, s
 descriptions and sub-agent specs. Local entries belong to this session; ancestor entries
 are your parents' local entries (read-only); global entries persist across sessions. The
 lines below are compact summaries used as routing hints, not full descriptions. The base
-system prompt is immutable; prompt entries are supplemental notes only."""
+system prompt is immutable; prompt entries are supplemental notes only. Local entries are
+the default: task progress, temporary blockers, session-specific facts. Global entries are
+only for stable cross-session lessons, durable user preferences, reusable skills and
+sub-agent specs, or facts explicitly qualified by project."""
 
 HARNESS_API_PROMPT = """`h = rlm.harness.harness()` is the synchronous Python API (pre-imported). Read with
 `h.overview()`, `h.search("query", kind=None)`, `h.list(kind)` and `h.get(kind, id)` (ids
@@ -333,9 +350,14 @@ content, reference={...}, arguments={...})` to describe an importable module;
 `h.get("episode", id).metadata["session_dir"]` opens one with `history`).
 `await rlm.refine.run(instructions=None, global_=False, rollback_id=None)` has the runtime
 review this conversation at the next model-call boundary and apply small evidence-backed
-edits itself, reported in a `<runtime_event kind="refinement">` notice; call it after a
-repeated failure, a reusable tactic or a user correction that should persist, and use
-`create_*` when you already know the exact entry. Keep entries small and evidence-backed."""
+edits itself, reported in a `<runtime_event kind="refinement">` notice. Refine when a
+failure repeats, a tactic proves reusable, a delegation role or procedure recurs (a
+sub-agent spec or skill), a fact or preference should outlive this session (a memory), a
+narrow behavioural rule should persist (a prompt note), a user corrects you, or an existing
+entry turns out to be wrong; use `create_*` when you already know the exact entry. Do not
+invent wrappers such as `call_skill(...)` or `run_subagent(...)`: skills are pre-imported
+modules and sub-agents are spawned with `rlm.agent.spawn`. Keep entries small and
+evidence-backed."""
 
 HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are pre-imported
 by name at kernel start. They follow the installed-skill contract minus installation:
@@ -432,7 +454,11 @@ def build_system_prompt(
     parts = [
         task_instructions
         if task_instructions is not None
-        else "You are an agent. Complete the user's task using the available tools."
+        else (
+            "You are an agent that uses code to solve tasks. Break the task into "
+            "sub-tasks, write and run code, observe the results, and iterate one step "
+            "at a time until the user's task is complete."
+        )
     ]
     if extra_instructions:
         parts.append(extra_instructions)

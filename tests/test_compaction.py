@@ -636,7 +636,7 @@ async def test_staircase_rolls_up_branch_summaries(session):
     assert "branches one and two" in staircase
     assert "branch three" in staircase
     assert "branch one\n" not in staircase
-    assert "h.blocks" in staircase
+    assert "hist.blocks" in staircase
 
     ledger = await history(session.dir)
     blocks = ledger.blocks
