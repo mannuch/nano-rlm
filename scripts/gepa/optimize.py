@@ -31,11 +31,15 @@ from tasks import read_tasks  # noqa: E402
 
 
 class ReflectionLM:
-    """A GEPA ``LanguageModel``: one chat completion per reflection prompt."""
+    """A GEPA ``LanguageModel``: one chat completion per reflection prompt, with the
+    provider-reported token usage accumulated across the run."""
 
     def __init__(self, model: str, api_key: str, base_url: str | None):
         self.model = model
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.calls = 0
+        self.tokens_in = 0
+        self.tokens_out = 0
 
     def __call__(self, prompt):
         messages = (
@@ -46,10 +50,22 @@ class ReflectionLM:
         response = self.client.chat.completions.create(
             model=self.model, messages=messages
         )
+        self.calls += 1
+        if response.usage is not None:
+            self.tokens_in += response.usage.prompt_tokens or 0
+            self.tokens_out += response.usage.completion_tokens or 0
         return response.choices[0].message.content or ""
 
+    def summary(self) -> str:
+        return (
+            f"{self.calls} reflection call(s) on {self.model}: "
+            f"{self.tokens_in} input / {self.tokens_out} output tokens"
+        )
 
-def write_report(result, seed: dict[str, str], valset, run_dir: Path) -> None:
+
+def write_report(
+    result, seed: dict[str, str], valset, run_dir: Path, reflection: str
+) -> None:
     best = result.best_candidate
     lines = [
         "# GEPA run report",
@@ -58,6 +74,8 @@ def write_report(result, seed: dict[str, str], valset, run_dir: Path) -> None:
         f"best candidate #{result.best_idx} with validation score "
         f"{result.val_aggregate_scores[result.best_idx]:.3f} "
         f"(seed {result.val_aggregate_scores[0]:.3f}).",
+        "",
+        f"Reflection usage this invocation: {reflection}.",
         "",
         "## Per-task validation scores (seed -> best)",
         "",
@@ -155,12 +173,13 @@ def main(argv: list[str] | None = None) -> int:
         f"train {len(trainset)} / val {len(valset)} tasks; components {components}; run_dir {run_dir}"
     )
 
+    reflection_lm = ReflectionLM(args.reflection_model, api_key, args.base_url)
     result = gepa.optimize(
         seed_candidate=seed,
         trainset=trainset,
         valset=valset,
         adapter=adapter,
-        reflection_lm=ReflectionLM(args.reflection_model, api_key, args.base_url),
+        reflection_lm=reflection_lm,
         module_selector=ExercisedComponentSelector(),
         reflection_prompt_template={
             name: reflection_template(name, seed) for name in components
@@ -181,12 +200,13 @@ def main(argv: list[str] | None = None) -> int:
     (run_dir / "best_prompt_overrides.json").write_text(
         json.dumps(overrides, indent=2), encoding="utf-8"
     )
-    write_report(result, seed, valset, run_dir)
+    write_report(result, seed, valset, run_dir, reflection_lm.summary())
     print(
         f"best candidate #{result.best_idx}: val {result.val_aggregate_scores[result.best_idx]:.3f} "
         f"(seed {result.val_aggregate_scores[0]:.3f}); {len(overrides)} component(s) changed; "
         f"see {run_dir / 'report.md'}"
     )
+    print(reflection_lm.summary())
     return 0
 
 
