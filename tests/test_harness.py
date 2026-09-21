@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from conftest import (
@@ -15,8 +16,11 @@ from conftest import (
 
 from rlm.config import ExecutionPolicy, HarnessConfig, InvocationContext, RuntimeConfig
 from rlm.engine import RLMEngine
+from rlm.history import read_records
 from rlm.harness import (
     HarnessStore,
+    HarnessView,
+    episode_path,
     build_view,
     harness,
     local_dir,
@@ -46,7 +50,13 @@ def test_store_crud_and_versioning(tmp_path):
 
     data = json.loads((tmp_path / "h" / "harness_state.json").read_text())
     assert data["schema"] == 1
-    assert list(data["entries"]) == ["prompt", "memory", "skill", "subagent"]
+    assert list(data["entries"]) == [
+        "prompt",
+        "memory",
+        "skill",
+        "subagent",
+        "episode",
+    ]
     assert data["entries"]["memory"]["check_git_status"]["version"] == 2
 
     assert store.delete("memory", entry.id) is True
@@ -482,3 +492,275 @@ def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
     )
     block = render_harness(view, skills_dir="/s")
     assert "/s/<name>/src/<name>/__init__.py" in block and "/s/<name>/SKILL.md" in block
+
+
+def _episode_metadata(**overrides):
+    return {
+        "session_dir": "/tmp/abc",
+        "session_id": "abc",
+        "stop_reason": "done",
+        "prompts": ["fix the parser"],
+        "turns": 3,
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "cwd": "/repo",
+        "blocks": [],
+        "started_at": 1.0,
+        "ended_at": 2.0,
+        **overrides,
+    }
+
+
+def test_episode_entries_are_engine_owned(tmp_path):
+    store = HarnessStore(tmp_path / "g", scope="global")
+    entry = store.upsert(
+        "episode",
+        "fix the parser",
+        "Outcome (done): fixed",
+        id="episode-abc",
+        path="episodes/2026-09",
+        metadata=_episode_metadata(),
+        source="engine",
+    )
+    assert entry.kind == "episode" and store.count("episode") == 1
+    reloaded = HarnessStore(tmp_path / "g", scope="global").load()
+    assert reloaded.get("episode", "episode-abc").metadata == _episode_metadata()
+    view = build_view(local_dir(tmp_path), global_dir=tmp_path / "g")
+    assert view.counts()["global"]["episode"] == 1
+    assert "episode: 1\n  - [global:episode-abc] fix the parser" in view.overview()
+    assert [e.id for e in view.search("parser", kind="episode")] == ["episode-abc"]
+    for call in (
+        lambda: view.create("episode", "t", "c", global_=True),
+        lambda: view.update("episode", "global:episode-abc", "t", "c"),
+        lambda: view.delete("episode", "global:episode-abc"),
+    ):
+        with pytest.raises(PermissionError, match="written by the engine"):
+            call()
+    assert reloaded.load().count("episode") == 1
+
+    legacy = tmp_path / "old"
+    legacy.mkdir()
+    (legacy / "harness_state.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "entries": {"prompt": {}, "memory": {}, "skill": {}, "subagent": {}},
+                "refinements": [],
+            }
+        )
+    )
+    assert HarnessStore(legacy).load().count("episode") == 0
+
+
+@pytest.mark.parametrize("record", [True, False])
+async def test_root_session_records_an_episode_at_close(session, tmp_path, record):
+    global_dir = tmp_path / "global"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content="fixed the parser"),
+        ]
+    )
+    config = make_runtime_config(
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=record)
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    result = await engine.run("fix the parser\nsecond line")
+
+    assert result.answer == "fixed the parser"
+    assert engine.execution_snapshot()["limits"]["record_episodes"] is record
+    store = HarnessStore(global_dir, scope="global").load()
+    episodes = store.list("episode")
+    records = [
+        r
+        for r in read_records(session.dir / "messages.jsonl")
+        if r["type"] == "episode"
+    ]
+    if not record:
+        assert episodes == [] and records == []
+        return
+    (episode,) = episodes
+    assert episode.id == f"episode-{session.dir.name}"
+    assert episode.title == "fix the parser"
+    assert episode.source == "engine"
+    assert episode.content == (
+        "Prompts (1):\n1. fix the parser\n\n(no compaction)\n\n"
+        "Outcome (done): fixed the parser"
+    )
+    meta = episode.metadata
+    assert meta["session_dir"] == str(session.dir)
+    assert meta["stop_reason"] == "done"
+    assert meta["prompts"] == ["fix the parser"] and meta["turns"] == 2
+    assert episode.path == episode_path(meta["started_at"], session.dir.name)
+    assert re.fullmatch(
+        r"episodes/\d{4}-\d{2}/\d{2}T\d{6}\.\d{3}-" + session.dir.name, episode.path
+    )
+    assert meta["blocks"] == []
+    assert meta["ended_at"] >= meta["started_at"]
+    assert records[0]["id"] == episode.id
+    assert records[0]["global_dir"] == str(global_dir.resolve())
+
+
+async def test_compacted_session_episode_carries_its_blocks(session, tmp_path):
+    global_dir = tmp_path / "global"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content="branch one summary"),
+            DummyMessage(content="done"),
+        ]
+    )
+    config = make_runtime_config(
+        policy=ExecutionPolicy(summarize_at_tokens=1),
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=True),
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+    await engine.run("task")
+    await engine.aclose()
+
+    store = HarnessStore(global_dir, scope="global").load()
+    (episode,) = store.list("episode")
+    assert "\n\n[tier 1 | branch 0 |" in episode.content
+    assert "branch one summary" in episode.content
+    assert [b["tier"] for b in episode.metadata["blocks"]] == [1]
+    assert episode.version == 1
+
+
+async def test_child_sessions_record_no_episode(session, tmp_path):
+    global_dir = tmp_path / "global"
+    config = make_runtime_config(
+        invocation=InvocationContext(depth=1),
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=True),
+    )
+    engine = RLMEngine(
+        client=DummyClient([]),  # type: ignore
+        session=session,
+        runtime_config=config,
+    )
+    engine._prompt_lines = ["child task"]
+    engine._harness = build_view(local_dir(session.dir), global_dir=global_dir)
+
+    engine._record_episode()
+    engine.close()
+
+    assert HarnessStore(global_dir, scope="global").load().count("episode") == 0
+
+
+async def test_multi_prompt_episode_lists_every_prompt(session, tmp_path):
+    global_dir = tmp_path / "global"
+    answers = [DummyMessage(content=f"answer {i}") for i in range(12)]
+    config = make_runtime_config(
+        harness=HarnessConfig(global_dir=str(global_dir), record_episodes=True)
+    )
+    engine = RLMEngine(
+        client=DummyClient(answers), session=session, runtime_config=config
+    )  # type: ignore
+    try:
+        for i in range(12):
+            await engine.prompt(f"step {i}\ndetails")
+    finally:
+        await engine.aclose()
+
+    (episode,) = HarnessStore(global_dir, scope="global").load().list("episode")
+    assert episode.title == "step 0"
+    assert episode.content.startswith(
+        "Prompts (12):\n1. step 0\n2. step 1\n"
+        + "".join(f"{i + 1}. step {i}\n" for i in range(2, 10))
+        + "... +2 more\n\n(no compaction)\n\nOutcome (done): answer 11"
+    )
+    assert episode.metadata["prompts"] == [f"step {i}" for i in range(12)]
+    assert [
+        e.id
+        for e in build_view(local_dir(tmp_path), global_dir=global_dir).search(
+            "step 7", kind="episode"
+        )
+    ] == [episode.id]
+
+
+def test_episode_paths_sort_chronologically():
+    first = episode_path(1_758_400_000.000, "bbbb")
+    same_ms = episode_path(1_758_400_000.000, "aaaa")
+    later = episode_path(1_758_400_000.001, "aaaa")
+    next_month = episode_path(1_761_000_000.0, "0000")
+    assert first == "episodes/2025-09/20T202640.000-bbbb"
+    assert sorted([next_month, later, first, same_ms]) == [
+        same_ms,
+        first,
+        later,
+        next_month,
+    ]
+    assert next_month.startswith("episodes/2025-10/")
+
+
+def test_entry_payloads_are_validated_by_kind(tmp_path):
+    store = HarnessStore(tmp_path / "h")
+    with pytest.raises(ValueError, match="session_id"):
+        store.upsert(
+            "episode", "t", "c", id="episode-x", metadata={"session_dir": "/tmp/x"}
+        )
+    with pytest.raises(ValueError, match="started_at"):
+        store.upsert(
+            "episode",
+            "t",
+            "c",
+            id="episode-x",
+            metadata=_episode_metadata(started_at="soon"),
+        )
+    with pytest.raises(ValueError, match="arguments"):
+        store.create(
+            "skill",
+            "Search",
+            "x",
+            reference={"type": "python", "import": "websearch", "callable": "run"},
+            arguments={"queries": "a list"},
+        )
+    entry = store.create(
+        "skill",
+        "Search",
+        "x",
+        reference={
+            "type": "python",
+            "import": "websearch",
+            "callable": "run",
+            "note": 1,
+        },
+        arguments={"queries": {"type": "array", "required": True}},
+    )
+    # Payloads are normalized: known fields filled in, unknown ones kept.
+    assert entry.reference == {
+        "type": "python",
+        "import": "websearch",
+        "callable": "run",
+        "call_pattern": None,
+        "note": 1,
+    }
+    assert entry.arguments == {
+        "queries": {
+            "type": "array",
+            "required": True,
+            "default": None,
+            "description": None,
+        }
+    }
+    # Memory metadata stays free-form.
+    free = store.create("memory", "m", "c", metadata={"anything": [1, 2]})
+    assert free.metadata == {"anything": [1, 2]}
+
+    state = tmp_path / "h" / "harness_state.json"
+    data = json.loads(state.read_text())
+    data["entries"]["skill"]["search"]["reference"] = {"type": "python"}
+    state.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="invalid skill entry 'search'"):
+        HarnessStore(tmp_path / "h").load()
+
+
+def test_view_methods_are_self_documenting():
+    # `help(h)` is the model's reference for everything the prompt leaves out.
+    undocumented = [
+        name
+        for name in dir(HarnessView)
+        if not name.startswith("_")
+        and not (getattr(HarnessView, name).__doc__ or "").strip()
+    ]
+    assert undocumented == []

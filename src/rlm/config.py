@@ -77,6 +77,11 @@ class HarnessConfig(_ConfigModel):
     skills_dir: str | None = None
     """Persistent directory of agent-authored skill packages, put on the kernel's
     sys.path at start. None (default) keeps authored packages session-local."""
+    record_episodes: bool = False
+    """Write one ``episode`` entry per root session into the global store at close:
+    the task, the coarsest compaction blocks, the outcome and the session directory.
+    Requires ``global_dir``. Off by default because a global store shared across RL
+    rollouts would let one rollout read another's outcome."""
 
 
 class ExecutionPolicy(_ConfigModel):

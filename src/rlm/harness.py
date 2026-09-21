@@ -24,16 +24,43 @@ import re
 import unicodedata
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
+
+HarnessKind = Literal["prompt", "memory", "skill", "subagent", "episode"]
 HarnessScope = Literal["local", "global"]
 EntryLayer = Literal["local", "ancestor", "global"]
 
-KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
+KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent", "episode")
+ENGINE_KINDS: frozenset[str] = frozenset({"episode"})
+"""Kinds the engine writes and nothing inside a session may change: an episode is
+another session's record."""
+EPISODE_CONTENT_CHARS = 4_000
+EPISODE_PROMPTS = 10
+"""Prompt lines listed in an episode's content; the metadata keeps them all."""
+
+
+def episode_path(started_at: float, session_id: str) -> str:
+    """``episodes/<YYYY-MM>/<DD>T<HHMMSS.mmm>-<session id>``: sorts chronologically to
+    the millisecond as a plain string (``list`` orders by path within a kind), the
+    session id breaks ties, and a month or day is still a searchable term."""
+    stamp = datetime.fromtimestamp(started_at, timezone.utc)
+    return (
+        f"episodes/{stamp:%Y-%m}/{stamp:%dT%H%M%S}.{stamp.microsecond // 1000:03d}"
+        f"-{session_id}"
+    )
+
+
 STATE_FILE_NAME = "harness_state.json"
 RESULTS_FILE_NAME = "refinements.jsonl"
 HARNESS_DIR_NAME = "harness"
@@ -125,41 +152,151 @@ def score_entry(entry: HarnessEntry, terms: list[str]) -> float:
 
 
 # --- records ---------------------------------------------------------------
+#
+# Every kind shares one storage record; the parts that differ by kind live in the
+# ``reference``, ``arguments`` and ``metadata`` dicts and are validated against the
+# payload models below when an entry is built, so a store never holds a skill without
+# a callable or an episode without its session directory.
 
 
-@dataclass
-class HarnessEntry:
-    """A reusable prompt note, memory, skill description or sub-agent spec."""
+class _Payload(BaseModel):
+    """Kind-specific structure inside an entry. Unknown keys are kept so a store
+    written by a newer build still loads."""
 
-    id: str
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
+class SkillReference(_Payload):
+    """How to call an importable Python module."""
+
+    type: Literal["python"]
+    import_: str = Field(alias="import", min_length=1)
+    callable: str | None = None
+    call_pattern: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_a_call_form(self) -> SkillReference:
+        if not (self.callable or self.call_pattern):
+            raise ValueError("skill reference requires a callable or call_pattern")
+        return self
+
+
+class SkillArgument(_Payload):
+    """One accepted input of a skill: its type, whether it is required, its default
+    and any constraints in ``description``."""
+
+    type: str | None = None
+    required: bool = False
+    default: Any = None
+    description: str | None = None
+
+
+class BlockRecord(_Payload):
+    """A compaction staircase block as the ledger records it."""
+
+    tier: int = Field(ge=1)
+    branches: tuple[int, int]
+    messages: tuple[int, int]
+    windows: tuple[int, int]
+    turns: tuple[int, int]
+    summary: str
+    request_id: str
+
+
+class EpisodeMetadata(_Payload):
+    """What an episode entry records about the session it stands for."""
+
+    session_dir: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    stop_reason: str
+    prompts: list[str]
+    turns: int = Field(ge=0)
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    cwd: str
+    blocks: list[BlockRecord]
+    started_at: float
+    ended_at: float
+
+
+_SKILL_ARGUMENTS = TypeAdapter(dict[str, SkillArgument])
+
+
+def _validated(field: str, adapter: TypeAdapter, value: Any) -> Any:
+    try:
+        return adapter.dump_python(adapter.validate_python(value), by_alias=True)
+    except ValidationError as error:
+        detail = error.errors()[0]
+        where = ".".join([field, *(str(part) for part in detail["loc"])])
+        raise ValueError(f"{where}: {detail['msg']}") from None
+
+
+def validate_payloads(
+    kind: str,
+    *,
+    reference: dict[str, Any],
+    arguments: dict[str, Any],
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The three payload dicts normalized through the kind's models. A violation
+    raises ``ValueError`` naming the field, e.g. ``arguments.queries: ...``."""
+    if kind == "skill":
+        reference = _validated("reference", TypeAdapter(SkillReference), reference)
+        arguments = _validated("arguments", _SKILL_ARGUMENTS, arguments)
+    elif kind == "episode":
+        metadata = _validated("metadata", TypeAdapter(EpisodeMetadata), metadata)
+    return reference, arguments, metadata
+
+
+class HarnessEntry(BaseModel):
+    """A reusable prompt note, memory, skill description, sub-agent spec or episode.
+
+    Built once and replaced on update, so the payload check in the validator is the
+    whole contract: an instance is always a valid entry of its kind.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(min_length=1)
     kind: HarnessKind
     title: str
     content: str
     path: str = "general"
     scope: HarnessScope = "local"
-    reference: dict[str, Any] = field(default_factory=dict)
-    arguments: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    reference: dict[str, Any] = Field(default_factory=dict)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     source: str = "agent"
-    created_at: str = field(default_factory=_now)
-    updated_at: str = field(default_factory=_now)
-    version: int = 1
+    created_at: str = Field(default_factory=_now)
+    updated_at: str = Field(default_factory=_now)
+    version: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def _check_payloads(self) -> HarnessEntry:
+        self.reference, self.arguments, self.metadata = validate_payloads(
+            self.kind,
+            reference=self.reference,
+            arguments=self.arguments,
+            metadata=self.metadata,
+        )
+        return self
+
+    def replace(self, **changes: Any) -> HarnessEntry:
+        """A validated copy with ``changes`` applied."""
+        return HarnessEntry.model_validate({**self.model_dump(), **changes})
 
 
-@dataclass
-class RefinementEvent:
+class RefinementEvent(BaseModel):
     """Compact record of one refinement pass, kept with the state it changed."""
+
+    model_config = ConfigDict(extra="ignore")
 
     id: str
     trigger: str
     changes: list[str]
     evidence: str = ""
     outcome: str = ""
-    created_at: str = field(default_factory=_now)
-
-
-_ENTRY_FIELDS = {f.name for f in fields(HarnessEntry)}
-_EVENT_FIELDS = {f.name for f in fields(RefinementEvent)}
+    created_at: str = Field(default_factory=_now)
 
 
 def validate_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]:
@@ -167,17 +304,7 @@ def validate_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]
     callable or call pattern."""
     if not isinstance(reference, dict):
         raise ValueError("skill entries require a Python reference")
-    normalized = dict(reference)
-    if normalized.get("type") != "python":
-        raise ValueError("skill reference.type must be 'python'")
-    if not isinstance(normalized.get("import"), str) or not normalized["import"]:
-        raise ValueError("skill reference requires a Python import")
-    if not any(
-        isinstance(normalized.get(key), str) and normalized[key]
-        for key in ("callable", "call_pattern")
-    ):
-        raise ValueError("skill reference requires a callable or call_pattern")
-    return normalized
+    return _validated("reference", TypeAdapter(SkillReference), reference)
 
 
 def _check_kind(kind: str) -> HarnessKind:
@@ -233,17 +360,17 @@ class HarnessStore:
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {k: {} for k in KINDS}
         for kind in KINDS:
             for entry_id, raw in (data.get("entries", {}).get(kind) or {}).items():
-                values = {
-                    key: value for key, value in raw.items() if key in _ENTRY_FIELDS
-                }
-                values["id"] = str(entry_id)
-                values["kind"] = kind
+                values = {**raw, "id": str(entry_id), "kind": kind}
                 values.setdefault("scope", self.scope)
-                entries[kind][str(entry_id)] = HarnessEntry(**values)
+                try:
+                    entries[kind][str(entry_id)] = HarnessEntry.model_validate(values)
+                except ValidationError as error:
+                    raise ValueError(
+                        f"{self.path}: invalid {kind} entry {entry_id!r}: {error}"
+                    ) from error
         self.entries = entries
         self.refinements = [
-            RefinementEvent(**{k: v for k, v in raw.items() if k in _EVENT_FIELDS})
-            for raw in data.get("refinements") or []
+            RefinementEvent.model_validate(raw) for raw in data.get("refinements") or []
         ]
         self._loaded_mtime = mtime
         return self
@@ -253,10 +380,10 @@ class HarnessStore:
         data = {
             "schema": 1,
             "entries": {
-                kind: {entry_id: asdict(e) for entry_id, e in records.items()}
+                kind: {entry_id: e.model_dump() for entry_id, e in records.items()}
                 for kind, records in self.entries.items()
             },
-            "refinements": [asdict(event) for event in self.refinements],
+            "refinements": [event.model_dump() for event in self.refinements],
         }
         temp = self.path.with_name(
             f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
@@ -343,23 +470,40 @@ class HarnessStore:
         source: str,
     ) -> HarnessEntry:
         existing = self.entries[kind].get(id)
+        # Checked here first so a kernel caller gets one line naming the field
+        # rather than the model's full validation report.
+        validate_payloads(
+            kind,
+            reference=reference
+            if reference is not None
+            else (existing.reference if existing else {}),
+            arguments=arguments
+            if arguments is not None
+            else (existing.arguments if existing else {}),
+            metadata=metadata
+            if metadata is not None
+            else (existing.metadata if existing else {}),
+        )
         if existing is not None:
-            existing.title = title
-            existing.content = content
             # None keeps the stored value so a title/content-only update does not
             # reset the grouping path or wipe a skill's reference/argument contract.
+            changes: dict[str, Any] = {
+                "title": title,
+                "content": content,
+                "source": source,
+                "updated_at": _now(),
+                "version": existing.version + 1,
+            }
             if path is not None:
-                existing.path = path
+                changes["path"] = path
             if reference is not None:
-                existing.reference = dict(reference)
+                changes["reference"] = dict(reference)
             if arguments is not None:
-                existing.arguments = dict(arguments)
+                changes["arguments"] = dict(arguments)
             if metadata is not None:
-                existing.metadata = dict(metadata)
-            existing.source = source
-            existing.updated_at = _now()
-            existing.version += 1
-            entry = existing
+                changes["metadata"] = dict(metadata)
+            entry = existing.replace(**changes)
+            self.entries[kind][id] = entry
         else:
             entry = HarnessEntry(
                 id=id,
@@ -476,9 +620,7 @@ class HarnessStore:
             if entry is None:
                 self.entries[kind].pop(id, None)
             else:
-                self.entries[kind][id] = HarnessEntry(
-                    **{**asdict(entry), "id": id, "kind": kind}
-                )
+                self.entries[kind][id] = entry.replace(id=id, kind=kind)
             self.save()
 
     def delete(self, kind: HarnessKind, id: str) -> bool:
@@ -519,10 +661,10 @@ class HarnessStore:
             "path": str(self.path),
             "scope": self.scope,
             "entries": {
-                kind: {entry_id: asdict(e) for entry_id, e in records.items()}
+                kind: {entry_id: e.model_dump() for entry_id, e in records.items()}
                 for kind, records in self.entries.items()
             },
-            "refinements": [asdict(event) for event in self.refinements],
+            "refinements": [event.model_dump() for event in self.refinements],
         }
 
 
@@ -558,6 +700,8 @@ class HarnessView:
         self.ancestors = builtins.list(ancestors or [])
 
     def layers(self) -> builtins.list[tuple[EntryLayer, HarnessStore]]:
+        """The visible stores as ``(layer, store)`` pairs: local, then ancestors
+        nearest first, then global. Mostly for the runtime; reads below merge them."""
         result: builtins.list[tuple[EntryLayer, HarnessStore]] = [("local", self.local)]
         result.extend(("ancestor", store) for store in self.ancestors)
         if self.global_ is not None:
@@ -565,8 +709,10 @@ class HarnessView:
         return result
 
     def _target(
-        self, global_: bool, id: str | None = None
+        self, kind: HarnessKind | None, global_: bool, id: str | None = None
     ) -> tuple[HarnessStore, str | None]:
+        if kind in ENGINE_KINDS:
+            raise PermissionError(f"{kind} entries are written by the engine")
         layer, bare = _split_layer(id) if id is not None else (None, None)
         if layer == "ancestor":
             raise PermissionError("ancestor harness entries are read-only")
@@ -587,9 +733,13 @@ class HarnessView:
         return [(layer, e) for layer, store in self.layers() for e in store.list(kind)]
 
     def list(self, kind: HarnessKind | None = None) -> builtins.list[HarnessEntry]:
+        """Every visible entry, optionally of one ``kind``, local layer first."""
         return [entry for _, entry in self.entries(kind)]
 
     def get(self, kind: HarnessKind, id: str) -> HarnessEntry | None:
+        """One entry by id, or None. ``id`` may carry the layer prefix exactly as
+        displayed (``local:x``, ``ancestor:x``, ``global:x``); a bare id searches the
+        layers in order and returns the first match."""
         layer, bare = _split_layer(id)
         for store_layer, store in self.layers():
             if layer is not None and store_layer != layer:
@@ -601,7 +751,13 @@ class HarnessView:
     def search(
         self, query: str, kind: HarnessKind | None = None, limit: int = 10
     ) -> builtins.list[HarnessEntry]:
-        """Visible entries ranked by weighted term overlap with ``query``."""
+        """Visible entries ranked by weighted term overlap with ``query``.
+
+        Args:
+            query: Free text; matches are scored on title, content, path and id.
+            kind: Restrict to one kind, e.g. ``"episode"`` for past sessions.
+            limit: Maximum entries returned (best first).
+        """
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise TypeError("limit must be a positive int")
         terms = query_terms(query)
@@ -616,12 +772,14 @@ class HarnessView:
         return [entry for _, entry in ranked[:limit]]
 
     def refinements(self) -> builtins.list[RefinementEvent]:
+        """Refinement events recorded in the local and global stores, oldest first."""
         events = self.local.list_refinements()
         if self.global_ is not None:
             events.extend(self.global_.list_refinements())
         return sorted(events, key=lambda e: e.created_at)
 
     def counts(self) -> dict[str, Any]:
+        """Per-kind entry counts by layer, as reported in the session snapshot."""
         return {
             "local": {kind: self.local.count(kind) for kind in KINDS},
             "global": {kind: self.global_.count(kind) for kind in KINDS}
@@ -634,7 +792,8 @@ class HarnessView:
     def overview(
         self, *, max_entries_per_kind: int = 20, max_content_chars: int = 120
     ) -> str:
-        """Human-readable summary of every visible layer."""
+        """Human-readable summary of every visible layer: store paths, per-kind entry
+        lines with their ``[layer:id]`` handles, and recent refinements. Start here."""
         lines = [f"Harness state: local={self.local.path}"]
         if self.ancestors:
             lines.append(
@@ -659,6 +818,7 @@ class HarnessView:
         return "\n".join(lines)
 
     def snapshot(self) -> dict[str, Any]:
+        """Raw state of every layer as JSON-ready dicts; for tooling, not reading."""
         return {
             "local": self.local.snapshot(),
             "ancestors": [store.snapshot() for store in self.ancestors],
@@ -681,7 +841,30 @@ class HarnessView:
         source: str = "agent",
         global_: bool = False,
     ) -> HarnessEntry:
-        store, bare = self._target(global_, id)
+        """Create an entry of ``kind``; the ``create_*`` helpers below fill ``kind``.
+
+        Args:
+            kind: ``prompt``, ``memory``, ``skill`` or ``subagent`` (``episode`` is
+                written by the engine).
+            title: Short name; the id is a slug of it unless ``id`` is given.
+            content: The note, fact, calling guide or delegation spec itself.
+            id: Explicit id (bare, or ``global:`` prefixed to pick that store).
+            path: Grouping facet shown next to the title, default ``general``.
+            reference: Skills only: ``{"type": "python", "import": "<module>",
+                "callable": "run" | "call_pattern": "await <module>(...)"}``.
+            arguments: Skills only: ``{name: {"type", "required", "default",
+                "description"}}`` for each accepted input (``{}`` if none).
+            metadata: Free-form extras (validated for engine kinds).
+            source: Who wrote it; ``agent`` for kernel calls.
+            global_: Write the shared global store instead of this session's.
+
+        Raises:
+            ValueError: A malformed payload (``reference.import: Field required``)
+                or an existing id.
+            PermissionError: The kind is engine-owned.
+            RuntimeError: ``global_`` without a global store configured.
+        """
+        store, bare = self._target(kind, global_, id)
         return store.create(
             kind,
             title,
@@ -708,7 +891,11 @@ class HarnessView:
         source: str = "agent",
         global_: bool = False,
     ) -> HarnessEntry:
-        store, bare = self._target(global_, id)
+        """Replace an entry's title and content, bumping its version. ``path``,
+        ``reference``, ``arguments`` and ``metadata`` are kept unless passed. ``id``
+        accepts the displayed ``local:``/``global:`` prefix; ancestor entries raise
+        ``PermissionError``."""
+        store, bare = self._target(kind, global_, id)
         assert bare is not None
         return store.update(
             kind,
@@ -723,7 +910,9 @@ class HarnessView:
         )
 
     def delete(self, kind: HarnessKind, id: str, *, global_: bool = False) -> bool:
-        store, bare = self._target(global_, id)
+        """Remove an entry; True if it existed. Same id and permission rules as
+        ``update``."""
+        store, bare = self._target(kind, global_, id)
         assert bare is not None
         return store.delete(kind, bare)
 
@@ -737,7 +926,10 @@ class HarnessView:
         id: str | None = None,
         global_: bool = False,
     ) -> RefinementEvent:
-        store, _ = self._target(global_)
+        """Record that a set of edits was made together and why, so ``overview()`` and
+        later reviews can see the history. The runtime records its own passes; call
+        this after a batch of manual ``create_*``/``update_*`` edits."""
+        store, _ = self._target(None, global_)
         return store.record_refinement(
             trigger, changes, evidence=evidence, outcome=outcome, id=id
         )
@@ -745,52 +937,74 @@ class HarnessView:
     # -- per-kind conveniences
 
     def create_memory(self, title: str, content: str, **kwargs: Any) -> HarnessEntry:
+        """A durable fact, decision, failure, preference or outcome. Keyword
+        arguments as for ``create``."""
         return self.create("memory", title, content, **kwargs)
 
     def update_memory(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a memory; see ``update``."""
         return self.update("memory", id, title, content, **kwargs)
 
     def delete_memory(self, id: str, **kwargs: Any) -> bool:
+        """Remove a memory; see ``delete``."""
         return self.delete("memory", id, **kwargs)
 
     def create_prompt_note(
         self, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """A narrow behavioural policy appended to the system prompt (path
+        ``policy`` by default). The base system prompt itself is immutable."""
         kwargs.setdefault("path", "policy")
         return self.create("prompt", title, content, **kwargs)
 
     def update_prompt_note(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a prompt note; see ``update``."""
         return self.update("prompt", id, title, content, **kwargs)
 
     def delete_prompt_note(self, id: str, **kwargs: Any) -> bool:
+        """Remove a prompt note; see ``delete``."""
         return self.delete("prompt", id, **kwargs)
 
     def create_skill(
         self, title: str, content: str, *, reference: dict[str, Any], **kwargs: Any
     ) -> HarnessEntry:
+        """Describe how to call a module that is already importable in the kernel.
+
+        ``reference`` is required: ``{"type": "python", "import": "<module>",
+        "callable": "run", "call_pattern": "await <module>(...)"}``. Pass
+        ``arguments={name: {"type": ..., "required": ..., "description": ...}}`` for
+        the accepted inputs. A skill entry never creates code; see ``create``.
+        """
         return self.create("skill", title, content, reference=reference, **kwargs)
 
     def update_skill(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a skill description; ``reference``/``arguments`` are kept unless
+        passed. See ``update``."""
         return self.update("skill", id, title, content, **kwargs)
 
     def delete_skill(self, id: str, **kwargs: Any) -> bool:
+        """Remove a skill description; see ``delete``."""
         return self.delete("skill", id, **kwargs)
 
     def create_subagent(self, title: str, content: str, **kwargs: Any) -> HarnessEntry:
+        """A reusable delegation role: purpose, instructions and when to invoke it,
+        including the spawn call form. Keyword arguments as for ``create``."""
         return self.create("subagent", title, content, **kwargs)
 
     def update_subagent(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
+        """Rewrite a sub-agent spec; see ``update``."""
         return self.update("subagent", id, title, content, **kwargs)
 
     def delete_subagent(self, id: str, **kwargs: Any) -> bool:
+        """Remove a sub-agent spec; see ``delete``."""
         return self.delete("subagent", id, **kwargs)
 
 

@@ -321,25 +321,20 @@ are your parents' local entries (read-only); global entries persist across sessi
 lines below are compact summaries used as routing hints, not full descriptions. The base
 system prompt is immutable; prompt entries are supplemental notes only."""
 
-HARNESS_API_PROMPT = """The pre-imported `rlm.harness` module is the Python API; calls are synchronous.
-`h = rlm.harness.harness()` returns the view. `h.overview()` prints everything visible;
-`h.search("query")` ranks entries by term overlap; `h.get(kind, id)` accepts ids exactly as
-shown here (`local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting
-component: `h.create_memory(title, content)` for durable facts, decisions and failures;
-`h.create_prompt_note(title, content)` for a narrow behavioural policy; `h.create_skill(title,
-content, reference={"type": "python", "import": "<module>", "callable": "run",
-"call_pattern": "await <module>(...)"}, arguments={...})` to describe how to use an
-importable module; `h.create_subagent(title, content)` for a reusable delegation role.
-`update_*(id, title, content)` and `delete_*(id)` edit existing entries; pass `global_=True`
-to write the global store when one is configured. Ancestor entries cannot be edited.
-`await rlm.refine.run(instructions=None, global_=False)` asks the runtime to review this
-conversation and apply small, evidence-backed harness edits itself; it returns at once and
-the pass runs at the next model-call boundary, after which a `<runtime_event
-kind="refinement">` notice lists the edits and the system prompt reflects them. Call it
-after a repeated failure, a reusable tactic, a repeated delegation role, or a user
-correction that should persist; use the direct `create_*` calls when you already know the
-exact entry to write. `await rlm.refine.run(rollback_id=...)` undoes a listed refinement.
-Keep entries small and evidence-backed."""
+HARNESS_API_PROMPT = """`h = rlm.harness.harness()` is the synchronous Python API (pre-imported). Read with
+`h.overview()`, `h.search("query", kind=None)` and `h.get(kind, id)` (ids exactly as shown:
+`local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting component:
+`h.create_memory(title, content)` for facts, decisions and failures;
+`h.create_prompt_note(title, content)` for a narrow policy; `h.create_skill(title,
+content, reference={...}, arguments={...})` to describe an importable module;
+`h.create_subagent(title, content)` for a delegation role. `help(h)` documents
+`update_*`/`delete_*`, `global_=True`, the skill payload contract and `episode` entries
+(past sessions: `h.get("episode", id).metadata["session_dir"]` opens one with `history`).
+`await rlm.refine.run(instructions=None, global_=False, rollback_id=None)` has the runtime
+review this conversation at the next model-call boundary and apply small evidence-backed
+edits itself, reported in a `<runtime_event kind="refinement">` notice; call it after a
+repeated failure, a reusable tactic or a user correction that should persist, and use
+`create_*` when you already know the exact entry. Keep entries small and evidence-backed."""
 
 HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are pre-imported
 by name at kernel start. They follow the installed-skill contract minus installation:

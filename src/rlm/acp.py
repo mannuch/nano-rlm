@@ -120,6 +120,7 @@ class _LimitsSnapshot(_ContractModel):
     max_refinements: int | None = Field(default=None, gt=0)
     max_refinement_attempts: int = Field(gt=0)
     harness_skills_dir: bool
+    record_episodes: bool
 
 
 class _SemanticEdge(_ContractModel):

@@ -14,11 +14,12 @@ from conftest import (
     tool_result,
 )
 
-from rlm.config import HarnessConfig
+from rlm.config import ExecutionPolicy, HarnessConfig
 from rlm.engine import RLMEngine
 from rlm.harness import HarnessStore, build_view, local_dir
 from rlm.history import read_records
 from rlm.refinement import (
+    BLOCKS_NOTE,
     RefinementRejected,
     apply_proposal,
     baseline_of,
@@ -27,8 +28,10 @@ from rlm.refinement import (
     load_history,
     parse_proposal,
     parse_review,
+    review_prompt,
     rollback_proposal,
 )
+from rlm.staircase import Block
 
 IMPORTABLE = {"websearch", "rlm"}
 
@@ -463,6 +466,72 @@ async def test_auto_refine_reviews_on_interval_and_only_refines_when_approved(se
         e["type"] for e in engine.execution_snapshot()["semantic_edges"]["edges"]
     )
     assert types.count("refinement_attempt") == 3 and types.count("refinement") == 1
+
+
+async def test_auto_refine_after_compaction_reviews_the_new_blocks(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            # Every tool result crosses the 1-token threshold: branch summary.
+            DummyMessage(content="branch one: the parser fix needed two retries"),
+            # Review on the compact trigger, approved, then the plan.
+            DummyMessage(
+                content='{"should_refine": true, "rationale": "recurring", "instructions": "keep it"}'
+            ),
+            DummyMessage(
+                content=_proposal(
+                    [
+                        {
+                            "action": "create",
+                            "kind": "memory",
+                            "title": "Parser retries",
+                            "content": "two retries were needed",
+                        }
+                    ]
+                )
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    config = make_runtime_config(
+        policy=ExecutionPolicy(summarize_at_tokens=1),
+        harness=HarnessConfig(auto_refine=True, refine_cooldown_seconds=0),
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    result = await engine.run("fix the parser")
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 1
+    review = client.calls[2]["messages"][-1]["content"]
+    assert "trigger:\ncompact" in review
+    assert "<compaction_blocks>\n" + BLOCKS_NOTE in review
+    assert "[tier 1 | branch 0 |" in review
+    assert "the parser fix needed two retries" in review
+    plan = client.calls[3]["messages"][-1]["content"]
+    assert "<evidence>\n" + BLOCKS_NOTE in plan
+    assert plan.index("</evidence>") < plan.index("<refine_instructions>")
+    reviews = _records(session, "refinement_review")
+    assert [(r["reason"], r["blocks"]) for r in reviews] == [("compact", [[1, 0, 1]])]
+    assert _records(session, "refinement")[0]["trigger"] == "auto:compact"
+    assert engine._compact_refine_blocks is None
+
+
+def test_review_prompt_lists_new_blocks_coarse_first(tmp_path):
+    view = build_view(local_dir(tmp_path))
+    fine = Block(1, (4, 5), (400, 499), (4, 4), (40, 49), "fifth branch", "r5")
+    coarse = Block(2, (0, 5), (0, 499), (0, 4), (0, 49), "x" * 700, "r-rollup")
+    prompt = review_prompt(
+        view, [], trigger="compact", turns_since_review=3, blocks=[fine, coarse]
+    )
+
+    assert prompt.index(fine.header()) < prompt.index(coarse.header())
+    assert "x" * 600 not in prompt
+    assert BLOCKS_NOTE in prompt
+    assert "compaction blocks since" in prompt
+    assert "<compaction_blocks>" not in review_prompt(
+        view, [], trigger="turn_interval", turns_since_review=3
+    )
 
 
 async def test_auto_refine_is_root_only_and_off_by_default(session):

@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from pydantic import ValidationError
+
 from rlm.harness import (
+    ENGINE_KINDS,
     KINDS,
     HarnessEntry,
     HarnessKind,
@@ -25,8 +28,12 @@ from rlm.harness import (
     HarnessStore,
     HarnessView,
     RefinementEvent,
+    SkillArgument,
+    SkillReference,
+    compact,
     slug,
 )
+from rlm.staircase import Block
 
 RefinementAction = Literal["create", "update", "delete"]
 
@@ -47,6 +54,8 @@ Components:
 - subagent: a reusable delegation spec (purpose, instructions, when to invoke). Include the
   call form: compose a concise task prompt and `child = await rlm.agent.spawn(task,
   name="worker")`; collect the answer with `await child.result()`.
+- episode: a past session's record, written by the engine at session close. Read-only:
+  never propose edits of this kind.
 
 Scope and persistence policy:
 - %(scope_policy)s
@@ -99,13 +108,21 @@ GLOBAL_SCOPE_POLICY = (
 
 REVIEW_PROMPT = """Decide whether this checkpoint should run a continual-harness refinement (trigger:
 %(trigger)s; %(turns)d work turns since the last review). A refinement writes local
-harness state by default: approve when the conversation since the last review contains
-evidence useful to this session's future turns (a repeated failure, a reusable tactic, a
-repeated delegation role, a durable fact or preference, a user correction). Reject one-off
-noise, unsupported hypotheses and transient tool output. Do not call tools. Reply with JSON
-only:
+harness state by default: approve when the conversation and any compaction blocks since
+the last review contain evidence useful to this session's future turns (a repeated
+failure, a reusable tactic, a repeated delegation role, a durable fact or preference, a
+user correction). Reject one-off noise, unsupported hypotheses and transient tool output.
+Do not call tools. Reply with JSON only:
 
 {"should_refine": true|false, "rationale": "short reason", "instructions": "optional focus for the refinement"}"""
+
+BLOCKS_NOTE = (
+    "A compaction just closed a branch. These are the blocks it produced; the staircase "
+    "above holds the rest. A tier-2 or higher block merges several branches: a failure, "
+    "tactic, preference or fact that recurs across blocks is evidence for a durable "
+    "entry; a single branch's progress is not."
+)
+BLOCK_SUMMARY_CHARS = 600
 
 HISTORY_LIMIT = 5
 _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
@@ -193,6 +210,16 @@ class RefinementResult:
 # --- prompts ---------------------------------------------------------------
 
 
+def blocks_section(tag: str, blocks: list[Block]) -> str:
+    """Compaction blocks as inline text: side calls run with ``tool_choice="none"``,
+    so the block summaries themselves are the evidence, never a pointer to follow."""
+    rendered = "\n\n".join(
+        f"{block.header()}\n{compact(block.summary, BLOCK_SUMMARY_CHARS)}"
+        for block in blocks
+    )
+    return f"<{tag}>\n{BLOCKS_NOTE}\n\n{rendered}\n</{tag}>"
+
+
 def refine_prompt(
     view: HarnessView,
     history: list[RefinementResult],
@@ -200,6 +227,7 @@ def refine_prompt(
     scope: HarnessScope,
     instructions: str | None,
     importable_names: list[str],
+    evidence: list[Block] | None = None,
 ) -> str:
     """The user message appended to the live conversation for a planning call."""
     parts = [
@@ -213,6 +241,8 @@ def refine_prompt(
         f"<current_harness_state>\n{view.overview(max_entries_per_kind=40, max_content_chars=240)}\n</current_harness_state>",
         f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
     ]
+    if evidence:
+        parts.append(blocks_section("evidence", evidence))
     if instructions:
         parts.append(f"<refine_instructions>\n{instructions}\n</refine_instructions>")
     return "\n\n".join(parts)
@@ -224,14 +254,16 @@ def review_prompt(
     *,
     trigger: str,
     turns_since_review: int,
+    blocks: list[Block] | None = None,
 ) -> str:
-    return "\n\n".join(
-        [
-            REVIEW_PROMPT % {"trigger": trigger, "turns": turns_since_review},
-            f"<current_harness_state>\n{view.overview(max_entries_per_kind=20)}\n</current_harness_state>",
-            f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
-        ]
-    )
+    parts = [
+        REVIEW_PROMPT % {"trigger": trigger, "turns": turns_since_review},
+        f"<current_harness_state>\n{view.overview(max_entries_per_kind=20)}\n</current_harness_state>",
+        f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
+    ]
+    if blocks:
+        parts.append(blocks_section("compaction_blocks", blocks))
+    return "\n\n".join(parts)
 
 
 def history_for_prompt(
@@ -357,6 +389,8 @@ def validate_edit(
         return f"unsupported action {edit.action!r}"
     if edit.kind not in KINDS:
         return f"unsupported kind {edit.kind!r}"
+    if edit.kind in ENGINE_KINDS:
+        return f"{edit.kind} entries are written by the engine"
     if edit.kind == "prompt" and entry_id == "base_system_prompt":
         return "base system prompt is not editable"
     if edit.action != "create" and not edit.id:
@@ -369,20 +403,23 @@ def validate_edit(
         return None
     if edit.arguments is None:
         return f"{edit.action} skill requires arguments"
-    reference = edit.reference
-    if not reference or reference.get("type") != "python":
+    if not edit.reference:
         return f"{edit.action} skill requires a python reference"
-    module = reference.get("import")
-    if not isinstance(module, str) or not module:
-        return f"{edit.action} skill requires a python import"
-    if not any(
-        isinstance(reference.get(key), str) and reference[key]
-        for key in ("callable", "call_pattern")
-    ):
-        return f"{edit.action} skill requires callable or call_pattern"
-    if module.split(".")[0] not in importable_names:
-        return f"{edit.action} skill references unknown module {module!r}"
+    try:
+        reference = SkillReference.model_validate(edit.reference)
+        for spec in edit.arguments.values():
+            SkillArgument.model_validate(spec)
+    except ValidationError as error:
+        return f"{edit.action} skill is malformed: {_first_error(error)}"
+    if reference.import_.split(".")[0] not in importable_names:
+        return f"{edit.action} skill references unknown module {reference.import_!r}"
     return None
+
+
+def _first_error(error: ValidationError) -> str:
+    detail = error.errors()[0]
+    location = ".".join(str(part) for part in detail["loc"])
+    return f"{location}: {detail['msg']}" if location else detail["msg"]
 
 
 def apply_proposal(
@@ -428,7 +465,7 @@ def apply_proposal(
             kind: HarnessKind = edit.kind  # type: ignore[assignment]
             records = store.entries[kind]
             before = records.get(entry_id)
-            outcome.before = asdict(before) if before is not None else None
+            outcome.before = before.model_dump() if before is not None else None
             key = f"{kind}:{entry_id}"
             if baseline is not None and key not in touched:
                 if outcome.before != baseline.get(kind, {}).get(entry_id):
@@ -467,7 +504,7 @@ def apply_proposal(
                     version=before.version + 1 if before else 1,
                 )
                 records[entry_id] = after
-                outcome.after = asdict(after)
+                outcome.after = after.model_dump()
             touched.add(key)
             outcome.applied = True
         result = RefinementResult(
@@ -548,7 +585,7 @@ def baseline_of(store: HarnessStore) -> dict[str, dict[str, dict[str, Any]]]:
     """Entries as they are now, for conflict detection at apply time."""
     store.load()
     return {
-        kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
+        kind: {entry_id: entry.model_dump() for entry_id, entry in records.items()}
         for kind, records in store.entries.items()
     }
 

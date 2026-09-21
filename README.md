@@ -363,12 +363,28 @@ Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directorie
 
 These artifacts are consumable for debugging, visualization, or training-data extraction.
 
+The only cross-session file is the optional global harness store, which lives wherever
+`harness.global_dir` points, outside any session directory:
+
+```text
+<global_dir>/
+├── harness_state.json     # global prompt/memory/skill/subagent entries and, when
+│                          # record_episodes is on, one episode entry per root session
+└── refinements.jsonl
+```
+
+An episode entry's `path` field (`episodes/<YYYY-MM>/…`) is a facet inside that JSON file,
+not a directory; the entry points back at its session through `metadata.session_dir`, and
+the session's `messages.jsonl` records the `global_dir` it published to. Nothing under
+`sessions/<id>/` changes.
+
 ## Continual harness
 
 The continual harness is durable state that supplements the immutable system prompt: `prompt`
 notes (narrow behavioural policies), `memory` entries (facts, decisions, failures), `skill`
 entries (descriptions of how to call an importable module, with a `reference` and an
-`arguments` contract) and `subagent` specs (reusable delegation roles). Each agent's local
+`arguments` contract), `subagent` specs (reusable delegation roles) and, in a global store,
+`episode` records of past sessions written by the engine (see [Episodes](#episodes)). Each agent's local
 store lives at `<session>/harness/harness_state.json`. A child reads its ancestors' local
 stores read-only alongside its own. The contract's `harness` object controls the feature:
 
@@ -384,7 +400,8 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
   "max_refinement_attempts": 3,
-  "skills_dir": null
+  "skills_dir": null,
+  "record_episodes": false
 }
 ```
 
@@ -410,11 +427,40 @@ h.update_memory("project_venv", "Project venv", "...", global_=True)   # needs g
 ```
 
 `update_*`/`delete_*` take the bare id or a `local:`/`global:` prefix; ancestor entries raise
-`PermissionError`. A `skill` entry describes an already-importable module; it is not a
+`PermissionError`. Every method carries a docstring, so `help(h)` (or `help(h.create_skill)`) is
+the full reference; the system prompt only lists the essential calls. A `skill` entry describes an already-importable module; it is not a
 package (see [Skills](#skills) for the on-disk skill contract). Stores are rewritten
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
 store outside a running session.
+
+### Entry schema
+
+Every entry is one `HarnessEntry` record (a Pydantic model in `rlm.harness`) with the same
+base fields for all kinds, and kind-specific structure inside three payload dicts that is
+validated whenever an entry is created, updated, restored or loaded from disk:
+
+| field | type | notes |
+| --- | --- | --- |
+| `id`, `kind`, `title`, `content` | `str` | `id` is a slug of the title unless given; `kind` is one of `prompt`, `memory`, `skill`, `subagent`, `episode` |
+| `path` | `str` | grouping facet, default `general`; not a filesystem path |
+| `scope` | `local` \| `global` | the store the entry lives in |
+| `reference`, `arguments`, `metadata` | `dict` | payloads, see below |
+| `source` | `str` | `agent`, `refinement` or `engine` |
+| `created_at`, `updated_at`, `version` | | maintained by the store |
+
+| kind | payload | model |
+| --- | --- | --- |
+| `skill` | `reference` | `SkillReference`: `type: "python"`, `import` (module), and `callable` and/or `call_pattern` |
+| `skill` | `arguments` | `{name: SkillArgument}` with `type`, `required` (default false), `default`, `description` |
+| `episode` | `metadata` | `EpisodeMetadata`: `session_dir`, `session_id`, `stop_reason`, `prompts`, `turns`, `prompt_tokens`, `completion_tokens`, `cwd`, `blocks` (`BlockRecord`s), `started_at`, `ended_at` |
+| others | `metadata` | free-form |
+
+Payload models keep unknown keys, so a store written by a newer build still loads, and
+fill in optional ones, so `entry.reference["call_pattern"]` is always present on a skill.
+A violation raises `ValueError` naming the field (`arguments.queries: Input should be a
+valid dictionary ...`) from the kernel API, is reported per edit by a refinement pass, and
+fails `load()` with the store path and entry id when a state file is inconsistent.
 
 ### Skill entries versus skill packages
 
@@ -497,7 +543,13 @@ Three triggers, all of which run between model calls and never inside a cell:
 - **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
   work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
   review call decides whether the trajectory holds evidence worth persisting; only an
-  approving review triggers a plan.
+  approving review triggers a plan. After a compaction the review also receives the blocks
+  that compaction produced (the branch summary and any rollups it sealed) as a
+  `<compaction_blocks>` section, with the hint that a failure, tactic or fact recurring
+  across blocks is evidence for a durable entry while one branch's progress is not; an
+  approved review hands the same blocks to the plan as `<evidence>`. Both are side calls
+  with `tool_choice="none"`, so the evidence is the block text itself, never a pointer to
+  follow. The `refinement_review` ledger record lists the block keys.
 
 `max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
 unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
@@ -506,6 +558,41 @@ reported as failed in the conversation and the run continues. Plan and review ca
 becomes the source of a `refinement` edge into the next work request, which also keeps its
 ordinary `continuation` edge. Refinement counts and edit totals appear in the session
 metrics; the `session-v1` snapshot carries per-scope entry counts under `harness`.
+
+### Episodes
+
+Trajectories are per agent directory and there is no global trajectory: `$RLM_HOME` is only
+the default parent of `sessions/<id>/`, and no session discovers or reads another unless
+it is handed a path. Episodes are the opt-in episodic half of cross-session memory, next to
+the semantic entries above. With `record_episodes: true` **and** a `global_dir`, the root
+engine writes one `episode` entry into the global store when the session closes, without
+any model call:
+
+- `title`: the first line of the first prompt; the entry's `path` field (a facet, not a
+  directory): `episodes/<YYYY-MM>/<DD>T<HHMMSS.mmm>-<session id>` from the session's start
+  time, so episodes list chronologically within the kind and a month or day is a
+  searchable term.
+- `content`: `Prompts (n):` with the first line of every prompt (the first ten listed,
+  the rest counted), then the compaction staircase as it stood at close (the coarsest
+  blocks, or `(no compaction)` for a session that fit one window), then
+  `Outcome (<stop_reason>): <answer>` for the last prompt.
+- `metadata`: `session_dir`, `session_id`, `stop_reason`, every prompt line under
+  `prompts`, `turns`, token totals, `cwd`, the block records, and start/end times.
+
+The entry is keyed by session id, so closing twice rewrites the same record. The system
+prompt lists episodes like any other kind, ranked against the task text when there are more
+than `max_prompt_entries_per_kind`; from the kernel, `h.search(query, kind="episode")` finds
+one and `history(session_dir=h.get("episode", id).metadata["session_dir"])` opens its ledger
+for `.blocks` / `.expand(i)`. Each session also logs an `episode` record naming what it
+published.
+
+Episodes are engine-owned: `create`/`update`/`delete` of that kind raise `PermissionError`
+from the kernel API and refinement edits of that kind are rejected, so nothing inside a
+session can rewrite or remove another session's record. The engine never deletes them
+either — a per-session setting must not prune a shared store — so trimming a long-lived
+store is an operator action. Both gates default to off because a global store shared
+across RL rollouts of one task would let a rollout read another's outcome. A store that
+holds episodes cannot be read by builds that predate the kind.
 
 ## Skills
 
