@@ -125,7 +125,7 @@ other = await rlm.agent.spawn(task="Check login behavior", name="login")
 
 agents = await rlm.agent.list()          # Direct children, including completed agents
 info = await researcher.info()          # Fresh metadata snapshot
-h = await researcher.history()          # Fresh conversation snapshot
+hist = await researcher.history()       # Fresh conversation snapshot
 researcher = await rlm.agent.get("researcher")  # Recover by sibling name or ID
 ```
 
@@ -228,7 +228,7 @@ The context since the last compaction is a *branch*. When a branch is compacted,
 ```text
 [tier 1 | branch 3 | window 3 | messages 412-1180 | turns 88-131]
 Ran the integration suite against the new parser; 3 failures remain in
-tests/test_edges.py (see h.messages[1104]). Fixed the tokenizer off-by-one in
+tests/test_edges.py (see hist.messages[1104]). Fixed the tokenizer off-by-one in
 src/lex.py. Open: the `--strict` flag is still unhandled.
 ```
 
@@ -289,7 +289,7 @@ This toy session has one call per branch, so the tail takes nearly all of it; in
 
 ### The pinned prompt
 
-The current prompt (the latest `user` or parent instruction, not a supervisor notice) is re-attached by ledger index between the system message and the staircase whenever it fits `compaction_prompt_tokens` (default 4k estimated tokens; 0 never pins), so the task is never reconstructed from a summary and the `[system, prompt]` prefix stays stable across compactions. A larger prompt is referenced by ledger index in the staircase message instead (`h.messages[i]`); a prompt already inside the kept tail is not duplicated. The `compaction` record names the `pinned_prompt_index`.
+The current prompt (the latest `user` or parent instruction, not a supervisor notice) is re-attached by ledger index between the system message and the staircase whenever it fits `compaction_prompt_tokens` (default 4k estimated tokens; 0 never pins), so the task is never reconstructed from a summary and the `[system, prompt]` prefix stays stable across compactions. A larger prompt is referenced by ledger index in the staircase message instead (`hist.messages[i]`); a prompt already inside the kept tail is not duplicated. The `compaction` record names the `pinned_prompt_index`.
 
 ```text
 window after compaction:  [system] [prompt] [staircase] [tail...]
@@ -303,13 +303,13 @@ The compaction message names the ledger path and the history API, and every bloc
 ```python
 from rlm import history
 
-h = await history()
-h.blocks                                     # [{"tier": 1, "branches": [0, 1], "messages": [1, 1], ...}, ...]
-h.expand(-1)                                 # the messages the newest block summarizes
-h.expand(h.blocks[0])                        # a block record works too
+hist = await history()
+hist.blocks                                  # [{"tier": 1, "branches": [0, 1], "messages": [1, 1], ...}, ...]
+hist.expand(-1)                              # the messages the newest block summarizes
+hist.expand(hist.blocks[0])                  # a block record works too
 ```
 
-`h.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts; `h.expand` returns the slice of `h.messages` a block covers, which for a rolled-up block is everything its children covered. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
+`hist.blocks` lists the blocks in ledger order and excludes those of rolled-back prompt attempts; `hist.expand` returns the slice of `hist.messages` a block covers, which for a rolled-up block is everything its children covered. A `compaction` record carries its tier-1 `block`, the `rollups_sealed` in that cycle, and the `tail_message_indices` it kept; each higher-tier block is a `rollup` record.
 
 ### Budgets and failure
 
@@ -334,17 +334,17 @@ The kernel can inspect its own history or a child's, including while the child i
 ```python
 from rlm import history
 
-h = await history()                  # Defaults to $RLM_SESSION_DIR
-requests = h.user_messages()          # Original inputs, including rolled-back attempts
-message = h.messages[3]               # Session-wide message index
-earlier = h.windows[0].messages       # Initial working context
+hist = await history()               # Defaults to $RLM_SESSION_DIR
+requests = hist.user_messages()       # Original inputs, including rolled-back attempts
+message = hist.messages[3]            # Session-wide message index
+earlier = hist.windows[0].messages    # Initial working context
 child_history = history(session_dir="/path/to/child-session")
 message = child_history.windows[4].messages[2]  # If that child has reached window 4
-blocks = h.blocks                     # Compaction blocks with the ranges they cover
-originals = h.expand(blocks[0])       # The messages the first block summarizes
+blocks = hist.blocks                  # Compaction blocks with the ranges they cover
+originals = hist.expand(blocks[0])    # The messages the first block summarizes
 ```
 
-Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.
+Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `hist.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.
 
 ## Session Directory
 
