@@ -103,18 +103,28 @@ BUILTIN_SKILL_PROMPTS: dict[str, str] = {
 
 TASK_PROMPT = (
     "You are an agent that uses code to solve tasks. Break the task into sub-tasks, "
-    "write and run code, observe the results, and iterate one step at a time until the "
-    "user's task is complete."
+    "write and run code, observe the results, and iterate until every part of the task "
+    "is complete. Work efficiently: handle independent sub-questions in as few cells as "
+    "practical, keep printed output short, and never dump whole files into the "
+    "transcript. When a request names a specific interface, call it and take the answer "
+    "from its result. Give each final answer in exactly the form the request asks for, "
+    "with nothing extra."
 )
 
 REPL_DOCTRINE_PROMPT = """Python is your orchestration language: loops, conditionals, parsing, and state live in
-cells, and tool calls are `await` expressions whose results you can bind and compose. Probe
-before you conclude: inspect the inputs (files, outputs, data) and only then plan. Bind
-what you read or search to named variables so you can slice, filter, and revisit it instead
-of re-reading. Cell output enters your context and stays there, so print what the next
-step needs, not whole files or results; summarize or aggregate in Python first. Evaluate an
-external project, dataset, or service through its own interface and use the REPL to drive
-the process and analyze what comes back."""
+cells, and tool calls are `await` expressions whose results you bind (`r = await ...`) and
+then inspect; never chain attribute access onto an un-awaited call. Probe before you
+conclude: inspect the inputs (files, outputs, data) and only then plan. Use the shell to
+locate things (grep, wc, ls) and do the analysis in the REPL itself with `ast`, `re` and
+`pathlib` rather than spawning Python subprocesses; derive a structural answer from a
+parse, not from eyeballing matches. Bind what you read or search to named variables so you
+can slice, filter, and revisit instead of re-running. Cell output enters your context and
+stays there, so print only what the next step needs, aggregated in Python first. When an
+answer is an exact string or a slice of text, compute it in Python and print its `repr()`,
+then copy it verbatim rather than retyping from memory. Batch independent lookups into one
+cell and accept an unambiguous result on the first pass instead of re-verifying. Evaluate
+an external project, dataset, or service through its own interface and use the REPL to
+drive the process and analyze what comes back."""
 
 DELEGATION_DOCTRINE_PROMPT = """Delegate work that is independent and self-contained: parallel context-heavy research,
 separate implementation tracks, or a sub-problem whose exploration would flood your own
