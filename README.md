@@ -416,6 +416,7 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
   "max_refinement_attempts": 3,
+  "refine_judge": null,
   "skills_dir": null,
   "record_episodes": false
 }
@@ -554,9 +555,14 @@ Three triggers, all of which run between model calls and never inside a cell:
   returns `{"scheduled": True}` (or a reason) and the pass runs at the next boundary;
   `await rlm.refine.status()` reports `pending`/`in_flight`.
 - **Host**: `session/prompt` may carry `ai.prime.rlm/refine-v1` in `_meta`:
-  `{"instructions": "...", "global": false, "rollback_id": null}`. The pass runs before
-  the turn; with an empty prompt it is the whole turn and the notice is the answer
-  (`stop_reason` `refined`). The key is refused when the harness is disabled.
+  `{"instructions": "...", "global": false, "rollback_id": null, "review": null, "focus": false}`.
+  The pass runs before the turn; with an empty prompt it is the whole turn and the notice
+  is the answer (`stop_reason` `refined`). `review` (`"model"` or `"typesafe"`) gates the
+  pass with that reviewer, and a decline becomes the answer
+  (`[refinement declined: <rationale>]`); `focus` has the TypeSafe judge write the
+  plan's focus instructions, with any host `instructions` appended after them. A rollback
+  takes neither. The key is refused when the harness is disabled, and `review:
+  "typesafe"` or `focus` is refused without `refine_judge`.
 - **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
   work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
   review call decides whether the trajectory holds evidence worth persisting; only an
@@ -567,6 +573,47 @@ Three triggers, all of which run between model calls and never inside a cell:
   approved review hands the same blocks to the plan as `<evidence>`. Both are side calls
   with `tool_choice="none"`, so the evidence is the block text itself, never a pointer to
   follow. The `refinement_review` ledger record lists the block keys.
+
+#### TypeSafe review judge
+
+`refine_judge` hands reviews to TypeSafe's System One model (Jev), which answers typed
+yes/no and choice questions with calibrated probabilities; the task model still writes
+the plan. It is opt-in, root agent only, and sends a compact evidence state to the
+TypeSafe API: the messages since the last review (clipped, newest first, user turns kept
+ahead of the rest), exception counts, the compaction blocks under review and the visible
+harness entries.
+
+```json
+"refine_judge": {
+  "api_key": "...",
+  "base_url": null,
+  "model": "jev-latest",
+  "mode": "gate",
+  "threshold": 0.7,
+  "veto_threshold": 0.8,
+  "home_confidence": 0.6,
+  "timeout_s": 30.0
+}
+```
+
+A review is two calls. The **gate** asks one yes/no question per kind of evidence
+(repeated failure, reusable tactic, delegation role, durable fact, user correction, and
+whether anything contradicts an existing entry); none at `threshold` declines after that
+one call. The **focus** call is asked only about the lessons that fired, stated as
+premises: per lesson, whether it is already recorded (a veto at `veto_threshold`) and
+which kind should hold it; per local entry, whether it covers a lesson or is contradicted;
+per turn, whether it is direct evidence. Code turns the answers into deterministic plan
+instructions naming the home kind (one kind when the choice's confidence reaches
+`home_confidence`), the entries to update or delete, and quotes of the strongest turns.
+
+`mode: "gate"` replaces the auto-refine model review; `"shadow"` keeps the model review
+deciding and logs the judge's verdict beside it. Every `refinement_review` record carries
+the `reviewer`, the judge's gate and focus probabilities, the evidence turns it chose, and
+TypeSafe token usage per call; a judge failure fails a TypeSafe-gated review and is only
+recorded (`judge_error`) where the judge informs another reviewer.
+`scripts/refine_eval/run.py` scores these pieces on labeled, steered scenarios: gate
+decisions against labels, focus against expected kinds and entries, and applied edits and
+follow-up probes per arm (`force`, `force+focus`, `model-gate`, `typesafe`, `none`).
 
 `max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
 unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is

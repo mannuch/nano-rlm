@@ -10,12 +10,14 @@ from conftest import (
     DummyClient,
     DummyMessage,
     DummyToolCall,
+    FakeTypeSafe,
     make_runtime_config,
     tool_result,
 )
 
-from rlm.config import ExecutionPolicy, HarnessConfig
+from rlm.config import ExecutionPolicy, HarnessConfig, RefineJudgeConfig
 from rlm.engine import RLMEngine
+from rlm.refine_judge import RefineJudge
 from rlm.harness import HarnessStore, build_view, local_dir
 from rlm.history import read_records
 from rlm.refinement import (
@@ -466,6 +468,143 @@ async def test_auto_refine_reviews_on_interval_and_only_refines_when_approved(se
         e["type"] for e in engine.execution_snapshot()["semantic_edges"]["edges"]
     )
     assert types.count("refinement_attempt") == 3 and types.count("refinement") == 1
+
+
+HOME_MEMORY = {"choice": "memory", "confidence": 0.9, "probabilities": {"memory": 0.9}}
+
+
+def _judged_engine(client, session, answers, *, auto_refine=True, **judge):
+    config = make_runtime_config(
+        harness=HarnessConfig(
+            auto_refine=auto_refine,
+            refine_turn_interval=1,
+            refine_cooldown_seconds=0,
+            refine_judge=RefineJudgeConfig(api_key="k", **judge),
+        )
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+    fake = FakeTypeSafe(answers)
+    engine._refine_judge = RefineJudge(config.harness.refine_judge, client=fake)
+    return engine, fake
+
+
+async def test_typesafe_gate_replaces_the_model_review(session):
+    """The judge's gate decides without a model review call; an approval hands its
+    focus instructions to the planning call, and a decline costs one judge call."""
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(
+                content=_proposal(
+                    [
+                        {
+                            "action": "create",
+                            "kind": "memory",
+                            "title": "Lesson",
+                            "content": "learned",
+                        }
+                    ]
+                )
+            ),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "2"})]),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine, fake = _judged_engine(
+        client,
+        session,
+        [{"user_correction": 0.9}, {"home_user_correction": HOME_MEMORY}, {}],
+    )
+
+    result = await engine.run("go")
+
+    assert result.answer == "done" and len(client.calls) == 4
+    assert not any(
+        "should run a continual-harness refinement" in c["messages"][-1]["content"]
+        for c in client.calls
+    )
+    plan = client.calls[1]["messages"][-1]["content"]
+    assert "Focus from the refinement review" in plan
+    assert "Record it as a memory." in plan
+    assert len(fake.calls) == 3
+    assert [t["index"] for t in fake.calls[2][0]["turns"]][0] > max(
+        t["index"] for t in fake.calls[0][0]["turns"]
+    )
+    reviews = _records(session, "refinement_review")
+    assert [(r["reviewer"], r["should_refine"]) for r in reviews] == [
+        ("typesafe", True),
+        ("typesafe", False),
+    ]
+    assert reviews[0]["judge"]["usage"].keys() == {"gate", "focus"}
+    assert reviews[1]["judge"]["focus"] is None
+    metrics = engine.execution_snapshot()["metrics"]
+    assert metrics["num_auto_refine_reviews"] == 2 and metrics["num_refinements"] == 1
+    types = [e["type"] for e in engine.execution_snapshot()["semantic_edges"]["edges"]]
+    assert types.count("refinement_attempt") == 1 and types.count("refinement") == 1
+
+
+async def test_shadow_judge_is_logged_beside_the_deciding_model_review(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content='{"should_refine": false, "rationale": "noise"}'),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine, _ = _judged_engine(
+        client,
+        session,
+        [{"user_correction": 0.9}, {"home_user_correction": HOME_MEMORY}],
+        mode="shadow",
+    )
+
+    assert (await engine.run("go")).answer == "done"
+    [review] = _records(session, "refinement_review")
+    assert review["reviewer"] == "model" and review["should_refine"] is False
+    assert review["shadow"]["gate_decision"] is True
+    assert "Record it as a memory." in review["shadow"]["instructions"]
+
+
+async def test_host_review_and_focus_by_the_judge(session):
+    """A host review by the judge can decline with no model call; host focus always
+    refines, with the judge's instructions ahead of the host's, or the host's alone
+    when nothing fired."""
+    proposal = DummyMessage(content=_proposal([]))
+    client = DummyClient([DummyMessage(content="hi"), proposal, proposal])
+    engine, fake = _judged_engine(
+        client,
+        session,
+        [
+            {"durable_fact": 0.2},
+            {"user_correction": 0.9},
+            {"home_user_correction": HOME_MEMORY},
+            {},
+        ],
+        auto_refine=False,
+    )
+    host = {"instructions": "keep", "global_": False, "rollback_id": None}
+    await engine.prompt("hello")
+
+    declined = await engine.prompt("", refine={**host, "review": "typesafe"})
+    assert declined.answer.startswith("[refinement declined: no signal reached")
+    assert len(client.calls) == 1
+
+    await engine.prompt("", refine={**host, "focus": True})
+    plan = client.calls[1]["messages"][-1]["content"]
+    assert "Record it as a memory." in plan
+    assert plan.endswith("Host instructions: keep\n</refine_instructions>")
+
+    await engine.prompt("", refine={**host, "focus": True})
+    assert client.calls[2]["messages"][-1]["content"].endswith(
+        "<refine_instructions>\nkeep\n</refine_instructions>"
+    )
+    assert len(fake.calls) == 4
+    reviews = _records(session, "refinement_review")
+    assert [(r["reason"], r["reviewer"], r["should_refine"]) for r in reviews] == [
+        ("host", "typesafe", False),
+        ("host", None, True),
+        ("host", None, True),
+    ]
 
 
 async def test_auto_refine_after_compaction_reviews_the_new_blocks(session):

@@ -14,10 +14,12 @@ import time
 import uuid
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from openai import APIStatusError, AsyncOpenAI
+from typesafe_sdk import TypeSafeError
 
 from rlm.client import (
     call_with_retries,
@@ -52,9 +54,10 @@ from rlm.harness import (
     episode_path,
     local_dir,
 )
-from rlm.semantic import Compaction, SemanticEdgeTracker
+from rlm.semantic import Compaction, Refinement, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt, render_harness, resolve_prompts
+from rlm.refine_judge import JudgeVerdict, RefineJudge, build_evidence
 from rlm.refinement import (
     RefinementFailed,
     RefinementRejected,
@@ -217,6 +220,17 @@ def _looks_like_plan(text: str) -> bool:
     )
 
 
+@dataclass
+class _Review:
+    """A refinement review's outcome; ``refinement`` is set only when approved."""
+
+    should_refine: bool
+    rationale: str
+    instructions: str | None
+    refinement: Refinement | None
+    failed: bool = False
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -311,6 +325,14 @@ class RLMEngine:
         self._last_refine_review_at: float | None = None
         # Blocks the latest compaction produced, pending an auto-refine review.
         self._compact_refine_blocks: list[Block] | None = None
+        # Stable message index where the next review's evidence starts.
+        self._review_mark = 0
+        judge = config.harness.refine_judge
+        self._refine_judge = (
+            RefineJudge(judge)
+            if judge is not None and config.harness.enabled and self.depth == 0
+            else None
+        )
 
         # Metrics
         self._metrics = RLMMetrics()
@@ -377,9 +399,10 @@ class RLMEngine:
     ) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state.
 
-        ``refine`` (``instructions``, ``global_``, ``rollback_id``) runs a host-requested
-        harness refinement before the turn; with an empty prompt the refinement is the
-        whole turn and its notice is the answer.
+        ``refine`` (``instructions``, ``global_``, ``rollback_id``, ``review``,
+        ``focus``) runs a host-requested harness refinement before the turn; with an
+        empty prompt the refinement is the whole turn and its notice (or the review's
+        decline) is the answer.
         """
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
@@ -447,15 +470,16 @@ class RLMEngine:
                     raise ValueError(
                         "the continual harness is disabled for this session"
                     )
-                refined = await self._refine(trigger="host", **refine)
+                refined, declined = await self._host_refine(**refine)
             if refine is not None and not prompt.strip():
                 self._metrics.stop_reason = "refined"
-                result = RLMResult(
-                    answer=notice_text(refined)
-                    if refined is not None
-                    else "[refinement declined]",
-                    session_dir=self.session.dir,
-                )
+                if refined is not None:
+                    answer = notice_text(refined)
+                elif declined is not None:
+                    answer = f"[refinement declined: {declined}]"
+                else:
+                    answer = "[refinement declined]"
+                result = RLMResult(answer=answer, session_dir=self.session.dir)
             else:
                 self.session.log(
                     {
@@ -1062,6 +1086,8 @@ class RLMEngine:
             try:
                 if self._owns_client:
                     await self.client.close()
+                if self._refine_judge is not None:
+                    await self._refine_judge.aclose()
             finally:
                 self._close_local()
 
@@ -1734,31 +1760,18 @@ class RLMEngine:
         self._turns_since_refine_review = 0
         self._last_refine_review_at = now
 
-        refinement = self._semantic_edges.begin_refinement(self._invocation_id)
-        prompt = review_prompt(
-            self._harness,
-            load_history(self._harness.local),
-            trigger=reason,
-            turns_since_review=turns,
+        judge = config.refine_judge
+        review = await self._review(
+            reason=reason,
+            reviewer="typesafe"
+            if judge is not None and judge.mode == "gate"
+            else "model",
+            shadow=judge is not None and judge.mode == "shadow",
             blocks=blocks,
-            template=self.prompts["review"],
+            turns=turns,
         )
-        try:
-            response, _ = await self._call_model(
-                [*self.session.messages, {"role": "user", "content": prompt}],
-                refinement_id=refinement.refinement_id,
-            )
-            text = (response.choices[0].message.content or "").strip()
-            should_refine, rationale, instructions = parse_review(text)
-        except (APIStatusError, RefinementRejected) as error:
-            self._semantic_edges.finish_refinement(refinement.refinement_id, "failed")
-            logger.warning("rlm: auto-refine review failed: %s", error)
+        if review.failed:
             return
-        except BaseException:
-            self._semantic_edges.finish_refinement(
-                refinement.refinement_id, "cancelled"
-            )
-            raise
         self._metrics.record(
             RefinementApplied(
                 trigger=f"auto:{reason}",
@@ -1767,26 +1780,198 @@ class RLMEngine:
                 review_only=True,
             )
         )
-        self.session.log(
-            {
-                "type": "refinement_review",
-                "reason": reason,
-                "should_refine": should_refine,
-                "rationale": rationale,
-                "request_id": self._last_request_id,
-                "blocks": [list(block.key) for block in blocks or []],
-            }
+        if review.should_refine:
+            await self._refine(
+                trigger=f"auto:{reason}",
+                instructions=review.instructions,
+                refinement=review.refinement,
+                evidence=blocks,
+            )
+
+    async def _review(
+        self,
+        *,
+        reason: str,
+        reviewer: Literal["model", "typesafe"] | None,
+        focus: bool = False,
+        shadow: bool = False,
+        blocks: list[Block] | None = None,
+        turns: int = 0,
+    ) -> _Review:
+        """Decide whether to refine and what to focus on, and log the decision as a
+        ``refinement_review`` record.
+
+        ``reviewer`` gates: ``"model"`` is the task model's review side call,
+        ``"typesafe"`` the System One judge, None an already-decided refinement. The
+        judge also runs, as a focus source that cannot decline, when ``focus`` is set
+        or when ``shadow`` logs its verdict beside the model's. An approved review
+        returns the semantic refinement the planning call belongs to.
+        """
+        judge_runs = reviewer == "typesafe" or focus or shadow
+        if judge_runs and self._refine_judge is None:
+            raise ValueError("a TypeSafe review requires harness.refine_judge")
+        refinement = self._semantic_edges.begin_refinement(self._invocation_id)
+        evidence = (
+            self._judge_evidence(reason, blocks, self._review_mark)
+            if judge_runs
+            else None
         )
+        self._review_mark = self.session.message_count
+        verdict: JudgeVerdict | None = None
+        judge_error: TypeSafeError | None = None
+        try:
+            if reviewer == "typesafe":
+                verdict = await self._refine_judge.review(evidence)
+                should_refine, rationale, instructions = (
+                    verdict.should_refine,
+                    verdict.rationale,
+                    verdict.instructions,
+                )
+            else:
+                side = self._side_judge(evidence) if judge_runs else None
+                if reviewer == "model":
+                    results = await asyncio.gather(
+                        self._model_review(reason, blocks, turns, refinement),
+                        *([side] if side is not None else []),
+                        return_exceptions=True,
+                    )
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
+                    should_refine, rationale, instructions = results[0]
+                    if side is not None:
+                        verdict, judge_error = results[1]
+                else:
+                    should_refine, rationale, instructions = True, "requested", None
+                    if side is not None:
+                        verdict, judge_error = await side
+                if focus and verdict is not None and verdict.instructions is not None:
+                    instructions = verdict.instructions
+        except (APIStatusError, RefinementRejected, TypeSafeError) as error:
+            self._semantic_edges.finish_refinement(refinement.refinement_id, "failed")
+            logger.warning("rlm: refinement review failed: %s", error)
+            return _Review(False, f"review failed: {error}", None, None, failed=True)
+        except BaseException:
+            self._semantic_edges.finish_refinement(
+                refinement.refinement_id, "cancelled"
+            )
+            raise
+        record: dict[str, Any] = {
+            "type": "refinement_review",
+            "reason": reason,
+            "reviewer": reviewer,
+            "should_refine": should_refine,
+            "rationale": rationale,
+            "instructions": instructions,
+            "blocks": [list(block.key) for block in blocks or []],
+        }
+        if reviewer == "model":
+            record["request_id"] = self._last_request_id
+        if verdict is not None:
+            record["shadow" if shadow else "judge"] = verdict.record()
+        if judge_error is not None:
+            record["judge_error"] = str(judge_error)
+        self.session.log(record)
         if not should_refine:
             self._semantic_edges.finish_refinement(refinement.refinement_id, "declined")
-            return
-        self._semantic_edges.release_refinement_request(refinement.refinement_id)
-        await self._refine(
-            trigger=f"auto:{reason}",
-            instructions=instructions,
-            refinement=refinement,
-            evidence=blocks,
+            return _Review(False, rationale, None, None)
+        if reviewer == "model":
+            self._semantic_edges.release_refinement_request(refinement.refinement_id)
+        return _Review(True, rationale, instructions, refinement)
+
+    async def _side_judge(
+        self, evidence: dict[str, Any]
+    ) -> tuple[JudgeVerdict | None, TypeSafeError | None]:
+        """The judge beside another reviewer: it cannot decline, and its failure is
+        recorded instead of failing the review it only informs."""
+        try:
+            return await self._refine_judge.review(evidence, force=True), None
+        except TypeSafeError as error:
+            logger.warning("rlm: refinement judge failed: %s", error)
+            return None, error
+
+    async def _model_review(
+        self,
+        reason: str,
+        blocks: list[Block] | None,
+        turns: int,
+        refinement: Refinement,
+    ) -> tuple[bool, str, str | None]:
+        prompt = review_prompt(
+            self._harness,
+            load_history(self._harness.local),
+            trigger=reason,
+            turns_since_review=turns,
+            blocks=blocks,
+            template=self.prompts["review"],
         )
+        response, _ = await self._call_model(
+            [*self.session.messages, {"role": "user", "content": prompt}],
+            refinement_id=refinement.refinement_id,
+        )
+        return parse_review((response.choices[0].message.content or "").strip())
+
+    def _judge_evidence(
+        self, reason: str, blocks: list[Block] | None, start: int
+    ) -> dict[str, Any]:
+        """The judge's state: context messages logged since ``start``, a stable
+        message index that survives window rebuilds."""
+        messages = [
+            (index, message)
+            for index, message in zip(
+                self.session.context_indices, self.session.messages, strict=True
+            )
+            if index >= start
+        ]
+        return build_evidence(
+            task=self._task_text,
+            trigger=reason,
+            messages=messages,
+            view=self._harness,
+            history=load_history(self._harness.local),
+            blocks=blocks,
+        )
+
+    async def _host_refine(
+        self,
+        *,
+        review: Literal["model", "typesafe"] | None = None,
+        focus: bool = False,
+        instructions: str | None = None,
+        global_: bool = False,
+        rollback_id: str | None = None,
+    ) -> tuple[RefinementResult | None, str | None]:
+        """A host-requested refinement: forced as before, or gated by ``review`` and/or
+        focused by the judge. Returns the result, or the decline rationale."""
+        if rollback_id is not None and (review is not None or focus):
+            raise ValueError("a rollback takes no review or focus")
+        limit = self.harness_config.max_refinements
+        if (review is None and not focus) or (
+            limit is not None and self._refinement_count >= limit
+        ):
+            result = await self._refine(
+                trigger="host",
+                instructions=instructions,
+                global_=global_,
+                rollback_id=rollback_id,
+            )
+            return result, None
+        outcome = await self._review(reason="host", reviewer=review, focus=focus)
+        if not outcome.should_refine:
+            return None, outcome.rationale
+        if instructions and outcome.instructions:
+            instructions = (
+                f"{outcome.instructions}\n\nHost instructions: {instructions}"
+            )
+        else:
+            instructions = outcome.instructions or instructions
+        result = await self._refine(
+            trigger="host",
+            instructions=instructions,
+            global_=global_,
+            refinement=outcome.refinement,
+        )
+        return result, None
 
     async def _refine(
         self,

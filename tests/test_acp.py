@@ -916,12 +916,33 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
         **{REFINE_METADATA_KEY: {"instructions": "focus", "global": True}},
     )
     await agent.prompt(created.session_id, [text_block("work")])
+    await agent.prompt(
+        created.session_id,
+        [text_block("")],
+        **{REFINE_METADATA_KEY: {"review": "model"}},
+    )
     engine = _Engine.instances[0]
-    assert engine.prompts == ["", "work"]
+    assert engine.prompts == ["", "work", ""]
+    unreviewed = {"review": None, "focus": False}
     assert engine.refines == [
-        {"instructions": "focus", "global_": True, "rollback_id": None},
+        {"instructions": "focus", "global_": True, "rollback_id": None, **unreviewed},
         None,
+        {"instructions": None, "global_": False, "rollback_id": None, **unreviewed}
+        | {"review": "model"},
     ]
+    with pytest.raises(RequestError) as rejected:
+        await agent.prompt(
+            created.session_id,
+            [text_block("")],
+            **{REFINE_METADATA_KEY: {"rollback_id": "r1", "review": "model"}},
+        )
+    assert "rollback" in str(rejected.value.data)
+    for request in ({"review": "typesafe"}, {"focus": True}):
+        with pytest.raises(RequestError) as rejected:
+            await agent.prompt(
+                created.session_id, [text_block("")], **{REFINE_METADATA_KEY: request}
+            )
+        assert "requires harness.refine_judge" in str(rejected.value.data)
     with pytest.raises(RequestError) as rejected:
         await agent.prompt(
             created.session_id,

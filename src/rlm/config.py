@@ -7,6 +7,8 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
@@ -54,6 +56,26 @@ class InvocationContext(_ConfigModel):
         return InvocationContext(depth=self.depth + 1, ancestor_harness_dirs=ancestors)
 
 
+class RefineJudgeConfig(_ConfigModel):
+    """TypeSafe System One judge for refinement reviews: typed yes/no signals decide
+    whether to refine and what the refinement should focus on; the task model still
+    plans the edits."""
+
+    api_key: str = Field(min_length=1, repr=False)
+    base_url: str | None = None
+    model: str = "jev-latest"
+    mode: Literal["gate", "shadow"] = "gate"
+    """``gate``: the judge replaces the model's auto-refine review. ``shadow``: the
+    model review still decides and the judge's verdict is only logged."""
+    threshold: float = Field(default=0.7, ge=0, le=1)
+    """Probability at which a gate signal fires or an entry is flagged."""
+    veto_threshold: float = Field(default=0.8, ge=0, le=1)
+    """Probability at which a fired lesson counts as already recorded."""
+    home_confidence: float = Field(default=0.6, ge=0, le=1)
+    """Choice confidence needed to name a single harness kind for a lesson."""
+    timeout_s: float = Field(default=30.0, gt=0)
+
+
 class HarnessConfig(_ConfigModel):
     """Continual harness: durable prompt notes, memories, skill descriptions and
     sub-agent specs rendered into the system prompt as a compact block."""
@@ -74,6 +96,9 @@ class HarnessConfig(_ConfigModel):
     """Refinement passes per engine before further requests are declined."""
     max_refinement_attempts: int = Field(default=3, gt=0)
     """Proposal attempts within one pass; an unusable reply is resampled."""
+    refine_judge: RefineJudgeConfig | None = None
+    """TypeSafe judge for auto-refine reviews and host-requested reviews. None keeps
+    every review on the task model."""
     skills_dir: str | None = None
     """Persistent directory of agent-authored skill packages, put on the kernel's
     sys.path at start. None (default) keeps authored packages session-local."""
