@@ -24,7 +24,7 @@ import gepa  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
 from adapter import ExercisedComponentSelector, NanoRlmAdapter  # noqa: E402
-from components import FIRST_RUN_COMPONENTS, reflection_template  # noqa: E402
+from components import DEFAULT_COMPONENTS, reflection_template  # noqa: E402
 from rlm.prompt import DEFAULT_PROMPTS  # noqa: E402
 from rollout import RolloutSettings  # noqa: E402
 from tasks import read_tasks  # noqa: E402
@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reflection-model", required=True)
     parser.add_argument(
         "--components",
-        default=",".join(FIRST_RUN_COMPONENTS),
+        default=",".join(DEFAULT_COMPONENTS),
         help="Comma-separated registry names to optimize",
     )
     parser.add_argument("--max-metric-calls", type=int, default=300)
