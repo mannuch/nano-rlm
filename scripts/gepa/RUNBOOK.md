@@ -23,18 +23,19 @@ uv run python scripts/gepa/workspace.py
 ## 3. Build the task set
 
 Paste the `NAME=PATH` lines from step 2 as `--repo` arguments. 15 per repository gives
-60 tasks; `optimize.py` holds out 33% by task id, so 20 validation / 40 training.
+60 tasks, written to `scripts/gepa/tasks/tasks.jsonl` (gitignored; `--out` chooses
+another file); `optimize.py` holds out 33% by task id, so 20 validation / 40 training.
 
 ```bash
 uv run python scripts/gepa/tasks.py \
   --repo nano-rlm=<path> --repo itsdangerous=<path> --repo click=<path> --repo attrs=<path> \
-  --out scripts/gepa/tasks.jsonl --per-repo 15 --seed 0
+  --per-repo 15 --seed 0
 ```
 
 A quick look at what was generated:
 
 ```bash
-uv run python -c "import json; [print(t['id'], [q['kind'] for q in t['questions']]) for t in map(json.loads, open('scripts/gepa/tasks.jsonl'))]"
+uv run python -c "import json; [print(t['id'], [q['kind'] for q in t['questions']]) for t in map(json.loads, open('scripts/gepa/tasks/tasks.jsonl'))]"
 ```
 
 ## 4. Credentials
@@ -50,7 +51,7 @@ In `tmux` or under `nohup`; a full run takes hours.
 
 ```bash
 uv run --group gepa python scripts/gepa/optimize.py \
-  --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
+  --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
   --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
   --max-metric-calls 300 --minibatch 3 --concurrency 8
 ```
@@ -103,5 +104,5 @@ diffs; never copy a candidate blindly.
 
 ## 9. Cleanup
 
-`scripts/gepa/runs/` and `scripts/gepa/workspace/` are gitignored. The sessions
+`scripts/gepa/workspace/`, `scripts/gepa/tasks/` and `scripts/gepa/runs/` are gitignored. The sessions
 directory reaches a few GB after 500 rollouts; delete it when the run is reviewed.

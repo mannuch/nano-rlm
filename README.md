@@ -753,10 +753,9 @@ session compacts and the compaction texts are exercised too.
 
 ```bash
 uv run python scripts/gepa/workspace.py                     # pinned checkouts, one NAME=PATH per line
-uv run python scripts/gepa/tasks.py --repo nano-rlm=<path> --repo click=<path> \
-    --out scripts/gepa/tasks.jsonl --per-repo 20
+uv run python scripts/gepa/tasks.py --repo nano-rlm=<path> --repo click=<path> --per-repo 20
 RLM_API_KEY=... RLM_BASE_URL=... uv run --group gepa python scripts/gepa/optimize.py \
-    --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
+    --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
     --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
     --max-metric-calls 300
 ```
