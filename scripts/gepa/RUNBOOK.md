@@ -50,7 +50,7 @@ In `tmux` or under `nohup`; a full run takes hours.
 
 ```bash
 uv run --group gepa python scripts/gepa/optimize.py \
-  --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
+  --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
   --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
   --max-metric-calls 300 --minibatch 3 --concurrency 8
 ```
