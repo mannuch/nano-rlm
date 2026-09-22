@@ -207,25 +207,38 @@ def _q_param_default(modules: list[_Module], rng: random.Random) -> Question | N
     )
 
 
-def _q_callers(modules: list[_Module], rng: random.Random) -> Question | None:
-    defined = {}
+_caller_options: dict[int, list[tuple[str, list[str]]]] = {}
+
+
+def _callers_index(modules: list[_Module]) -> list[tuple[str, list[str]]]:
+    """(name, callers) for every uniquely defined function with 2-6 callers; the
+    called-name sets are computed once per module list."""
+    key = id(modules)
+    if key in _caller_options:
+        return _caller_options[key]
+    defined: dict[str, list[str]] = {}
+    calls: list[tuple[str, str, set[str]]] = []
     for m in modules:
         for qualname, fn in _functions(m.tree):
             defined.setdefault(fn.name, []).append(qualname)
+            calls.append((m.path, qualname, _called_names(fn)))
     options = []
     for name, qualnames in defined.items():
         if len(qualnames) != 1 or len(name) < 4 or name.startswith("_"):
             continue
         callers = sorted(
-            {
-                f"{m.path}::{qualname}"
-                for m in modules
-                for qualname, fn in _functions(m.tree)
-                if name in _called_names(fn) and qualname != qualnames[0]
-            }
+            f"{path}::{qualname}"
+            for path, qualname, called in calls
+            if name in called and qualname != qualnames[0]
         )
         if 2 <= len(callers) <= 6:
             options.append((name, callers))
+    _caller_options[key] = options
+    return options
+
+
+def _q_callers(modules: list[_Module], rng: random.Random) -> Question | None:
+    options = _callers_index(modules)
     if not options:
         return None
     name, callers = rng.choice(options)
