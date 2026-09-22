@@ -126,6 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tail", type=int, default=1_000)
     parser.add_argument("--max-depth", type=int, default=1)
     parser.add_argument(
+        "--delegation-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run sessions with policy.delegation_prompt (the guidance itself is not optimized)",
+    )
+    parser.add_argument(
         "--timeout", type=float, default=900.0, help="Seconds per question prompt"
     )
     parser.add_argument("--seed", type=int, default=0)
@@ -162,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         summarize_at_tokens=args.summarize_at,
         compaction_tail_tokens=args.tail,
         max_depth=args.max_depth,
+        delegation_prompt=args.delegation_prompt,
         timeout_s=args.timeout,
     )
     adapter = NanoRlmAdapter(
