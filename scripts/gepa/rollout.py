@@ -362,7 +362,16 @@ def _score(
             )
             result.check_ok, result.check_note = ok, note
             result.expected = question.answer
-            result.score = score_answer(question, answer_text) if ok else 0.0
+            if not ok:
+                result.score = 0.0
+            elif question.check == "history_expand":
+                got = extract_answer(answer_text or "")
+                result.score = float(
+                    got is not None
+                    and _quoted_words(got) == _quoted_words(question.answer)
+                )
+            else:
+                result.score = score_answer(question, answer_text)
         else:
             result.score = score_answer(question, answer_text)
         results.append(result)
@@ -448,6 +457,11 @@ def _check_history_expand(question, rollout, hist, session_dir, asked_at):
     if not any("history" in c.code for c in cells):
         return False, "no cell used the history API after the question"
     return True, "used the history API"
+
+
+def _quoted_words(text: str) -> str:
+    """Words without the punctuation a model may add or drop when quoting."""
+    return " ".join(re.sub(r"[`'\",.]", " ", str(text)).split())
 
 
 CHECKS = {

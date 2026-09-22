@@ -245,9 +245,12 @@ def _q_callers(modules: list[_Module], rng: random.Random) -> Question | None:
     return Question(
         kind="callers",
         text=(
-            f"Which functions or methods in this repository call `{name}(...)`? Answer "
-            "with a comma-separated list of `path::QualifiedName` entries (methods as "
-            "`Class.method`), excluding the definition itself."
+            f"Which module-level functions and class methods in this repository call "
+            f"`{name}(...)`? Answer with a comma-separated list of `path::QualifiedName` "
+            "entries, where a qualified name is a module-level function (`function`) or a "
+            "method of a module-level class (`Class.method`). A call inside a nested "
+            "function counts for the module-level function or method that encloses it; "
+            "never report a nested function's own name. Exclude the definition itself."
         ),
         answer=callers,
     )
@@ -329,9 +332,10 @@ def _q_decorator_users(modules: list[_Module], rng: random.Random) -> Question |
     return Question(
         kind="decorator_users",
         text=(
-            f"Which functions or methods in `{m.path}` are decorated with `@{name}` (with "
-            "or without arguments)? Answer with a comma-separated list of qualified names "
-            "(methods as `Class.method`)."
+            f"Which module-level functions and methods of module-level classes in "
+            f"`{m.path}` are decorated with `@{name}` (with or without arguments)? Ignore "
+            "definitions nested inside functions or inside nested classes. Answer with a "
+            "comma-separated list of qualified names (`function` or `Class.method`)."
         ),
         answer=qualnames,
         path=m.path,
@@ -411,8 +415,9 @@ def _q_history_cells(rng: random.Random, repo: Path) -> Question:
         kind="api",
         check="history_cells",
         text=(
-            "Using the conversation history API, count how many `ipython` tool calls you "
-            "made in this session before this question, and report the number."
+            "Using the conversation history API, count the `ipython` tool calls recorded "
+            "in the ledger before the user message that contains this question, and "
+            "report that number. Do not count the cells you run to answer this."
         ),
         answer=None,
     )
@@ -424,7 +429,8 @@ def _q_history_expand(rng: random.Random, repo: Path) -> Question:
         check="history_expand",
         text=(
             "Using the conversation history API, retrieve the exact text of the first "
-            "question asked in this session and report its first six words."
+            "question asked in this session and report its first six words separated by "
+            "single spaces, exactly as written."
         ),
         answer=None,
     )

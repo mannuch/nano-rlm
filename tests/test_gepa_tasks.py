@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "gepa"))
 
 from components import validate_candidate  # noqa: E402
-from rollout import CHECKS, Cell, Rollout  # noqa: E402
+from rollout import CHECKS, Cell, Rollout, _quoted_words  # noqa: E402
 from tasks import (  # noqa: E402
     Question,
     _modules,
@@ -211,6 +211,21 @@ def test_ledger_checks_for_api_questions(tmp_path: Path):
     assert not CHECKS["history_cells"](
         history, _rollout([(4, "print(1)")]), None, tmp_path, 3
     )[0]
+
+
+def test_history_expand_ignores_quoting_punctuation(tmp_path: Path):
+    question = Question(
+        "api", "", "Which functions or methods in", check="history_expand"
+    )
+    rollout = _rollout([(4, "hist = await history(); hist.expand(0)")])
+    ok, _ = CHECKS["history_expand"](question, rollout, None, tmp_path, 3)
+    assert ok
+    assert _quoted_words("Which, functions, or, methods, in") == _quoted_words(
+        "`Which` functions or methods in."
+    )
+    assert _quoted_words("Which functions in") != _quoted_words(
+        "Which functions or methods in"
+    )
 
 
 def test_candidate_guard_names_dropped_tokens():

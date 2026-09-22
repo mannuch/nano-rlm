@@ -9,19 +9,21 @@ from __future__ import annotations
 
 from rlm.prompt import DEFAULT_PROMPTS, REQUIRED_PROMPT_MARKERS
 
-FIRST_RUN_COMPONENTS = (
+DEFAULT_COMPONENTS = (
     "task",
     "repl_doctrine",
     "delegation_doctrine",
+    "history",
     "checkpoint",
     "rollup",
     "staircase_framing",
 )
+"""``history`` is a reference text rather than doctrine, but the questions that exercise
+the history API score lowest, so it is tuned by default (under the token guard)."""
 
 REFERENCE_COMPONENTS = (
     "runtime_reference",
     "delegation_reference",
-    "history",
     "harness_api",
 )
 
