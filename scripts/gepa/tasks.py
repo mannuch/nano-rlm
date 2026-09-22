@@ -558,7 +558,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Generate question sessions over repositories."
     )
     parser.add_argument("--repo", action="append", required=True, metavar="NAME=PATH")
-    parser.add_argument("--out", required=True, help="Output tasks.jsonl")
+    parser.add_argument(
+        "--out",
+        default="scripts/gepa/tasks/tasks.jsonl",
+        help="Output file (its directory is created)",
+    )
     parser.add_argument("--per-repo", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repo-questions", type=int, default=4)
@@ -577,8 +581,10 @@ def main(argv: list[str] | None = None) -> int:
                 api_questions=args.api_questions,
             )
         )
-    write_tasks(Path(args.out), tasks)
-    print(f"wrote {len(tasks)} tasks to {args.out}")
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_tasks(out, tasks)
+    print(f"wrote {len(tasks)} tasks to {out}")
     return 0
 
 

@@ -209,6 +209,7 @@ __marimo__/
 # rlm session data
 .rlm/
 
-# prompt optimization workspaces and runs
+# prompt optimization workspaces, generated task sets and runs
 scripts/gepa/workspace/
+scripts/gepa/tasks/
 scripts/gepa/runs/
