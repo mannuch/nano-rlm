@@ -9,15 +9,26 @@ CHECKPOINT_PROMPT = """Create a concise continuation summary for the current tas
 Summarize only the work since the most recent compaction block: everything after the last
 `<runtime_event kind="compaction">` message, or the whole conversation when there is none.
 Earlier history is already preserved above at decreasing resolution and must not be restated.
-Preserve what is needed to resume accurately:
-- The user's objective, exact requirements, constraints, and unresolved decisions.
-- Completed work, evidence/results, important paths or sources, and remaining next steps.
-- Ongoing orchestration: child names/IDs, assignments and pending follow-ups; Bash job IDs,
-  commands and last-known outcomes; subscriptions/targets; unread or retrieved events still
-  requiring action; output cursors and useful history message/window references.
-- Any interrupted or uncertain operation and side effects that must be inspected before retrying.
 
-Include runnable commands, test filters, or concrete edits when relevant and known.
+Length and ordering matter: keep the summary well under 2500 characters and put the most
+critical, most recent information first, in this order:
+1. The current request, quoted or paraphrased exactly, with the output format, constraints
+   and exclusions it requires.
+2. The best answer so far, written in that final form, and what still needs checking before
+   it can be given. If the evidence already settles it, say so, so the next step is to
+   answer rather than to redo the work.
+3. Conclusions from the evidence (facts, paths, line numbers, counts), one line each, not
+   raw output or long listings. Note what was excluded and why.
+4. Earlier requests in this branch and the answers given, one line each.
+5. Working directory, environment quirks, and how the material is being inspected.
+6. Ongoing orchestration: child names/IDs, assignments and pending follow-ups; Bash job IDs,
+   commands and last-known outcomes; subscriptions/targets; unread or retrieved events still
+   requiring action; output cursors and useful history message/window references.
+7. Any interrupted or uncertain operation and side effects that must be inspected before retrying.
+
+Preserve the user's objective, exact requirements, constraints, and unresolved decisions.
+Include runnable commands, test filters, or concrete edits only when they save real work;
+prefer recording a command's result over the command itself.
 Use only APIs/tools actually available; do not invent edits, results, resource IDs, or state.
 Distinguish last-observed state from assumptions: background work may progress during compaction.
 If resources are no longer needed, note that they can be cancelled; do not imply they were cancelled.
