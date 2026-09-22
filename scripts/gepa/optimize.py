@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-metric-calls", type=int, default=300)
     parser.add_argument("--minibatch", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=6)
-    parser.add_argument("--summarize-at", type=int, default=7_000)
+    parser.add_argument("--summarize-at", type=int, default=10_000)
     parser.add_argument("--tail", type=int, default=1_000)
     parser.add_argument("--max-depth", type=int, default=1)
     parser.add_argument(

@@ -40,7 +40,7 @@ class RolloutSettings:
     model: str
     api_key: str
     base_url: str | None = None
-    summarize_at_tokens: int = 7_000
+    summarize_at_tokens: int = 10_000
     compaction_tail_tokens: int = 1_000
     compaction_fanout: int = 2
     max_depth: int = 1
