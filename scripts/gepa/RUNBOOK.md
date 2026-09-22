@@ -47,14 +47,22 @@ export RLM_BASE_URL=https://openrouter.ai/api/v1
 
 ## 5. Run
 
-In `tmux` or under `nohup`; a full run takes hours.
+In `tmux` or under `nohup`; a full run takes hours. Raise the open-file limit first:
+each concurrent rollout is an IPython kernel with several sockets, and macOS shells
+default to 256.
 
 ```bash
-uv run --group gepa python scripts/gepa/optimize.py \
-  --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
+ulimit -n 4096
+nohup uv run --group gepa python scripts/gepa/optimize.py \
+  --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
   --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
-  --max-metric-calls 300 --minibatch 3 --concurrency 8
+  --max-metric-calls 300 --minibatch 3 --concurrency 8 \
+  > scripts/gepa/runs/first.log 2>&1 < /dev/null &
+disown
 ```
+
+`nohup` ignores SIGHUP only; detaching stdin and `disown` keep a stray Ctrl-C or a
+closing terminal from reaching the process.
 
 Defaults this accepts: `--summarize-at 10000`, `--tail 1000`, `--max-depth 1`,
 `--timeout 900` per question, and the first-run components (`task`, `repl_doctrine`,
@@ -73,6 +81,7 @@ input tokens dominate; the reflection model is a few dollars). For a cheaper fee
 ## 6. Monitor
 
 ```bash
+tail -f scripts/gepa/runs/first.log                    # the process itself (tracebacks land here)
 tail -f scripts/gepa/runs/first/run_log.txt            # iterations, proposals, accept/reject
 wc -l scripts/gepa/runs/first/sessions/rollouts.jsonl  # rollouts completed
 uv run python -c "
