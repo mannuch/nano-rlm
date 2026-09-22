@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import os
 from queue import Empty
@@ -251,6 +252,27 @@ class _KernelDied(RuntimeError):
 MAX_RECOVERY_ATTEMPTS = 3
 
 
+def _release_thread_loop() -> None:
+    """Close the event loop jupyter_client's sync wrappers leave set on this thread.
+
+    ``jupyter_core.utils.ensure_event_loop`` remembers its loop in a context variable;
+    ``asyncio.to_thread`` runs each call in a copied context, so every kernel start in
+    a worker thread would otherwise create a new loop that is never closed.
+    """
+    try:
+        asyncio.get_running_loop()
+        return
+    except RuntimeError:
+        pass
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return
+    if not loop.is_running():
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 class IPythonREPL:
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
@@ -328,6 +350,7 @@ class IPythonREPL:
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
         self._inject_startup()
+        _release_thread_loop()
 
     def _inject_startup(self):
         """Set up kernel: cwd, env vars, nest_asyncio, skill pre-imports."""
@@ -476,6 +499,7 @@ import rlm
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
+        _release_thread_loop()
         self._inject_startup()
 
     def interrupt(self):
