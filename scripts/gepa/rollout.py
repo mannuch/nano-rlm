@@ -44,6 +44,8 @@ class RolloutSettings:
     compaction_tail_tokens: int = 1_000
     compaction_fanout: int = 2
     max_depth: int = 1
+    delegation_prompt: bool = True
+    """Append the runtime's delegation guidance; it is fixed text, not a candidate."""
     max_total_tokens: int = 300_000
     exec_timeout: int = 60
     timeout_s: float = 900.0
@@ -124,6 +126,7 @@ def _config(candidate: dict[str, str], settings: RolloutSettings) -> RuntimeConf
         invocation=InvocationContext(),
         policy=ExecutionPolicy(
             max_depth=settings.max_depth,
+            delegation_prompt=settings.delegation_prompt,
             max_total_tokens=settings.max_total_tokens,
             exec_timeout=settings.exec_timeout,
             summarize_at_tokens=settings.summarize_at_tokens,

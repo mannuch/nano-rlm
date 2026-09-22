@@ -56,7 +56,8 @@ uv run --group gepa python scripts/gepa/optimize.py \
 ```
 
 Defaults this accepts: `--summarize-at 10000`, `--tail 1000`, `--max-depth 1`,
-`--timeout 900` per question, and the first-run components (`task`, `repl_doctrine`,
+`--delegation-prompt` (sessions run with `policy.delegation_prompt`; that text stays
+fixed), `--timeout 900` per question, and the first-run components (`task`, `repl_doctrine`,
 `delegation_doctrine`, `checkpoint`, `rollup`, `staircase_framing`; `--components`
 selects others, including the reference texts).
 
