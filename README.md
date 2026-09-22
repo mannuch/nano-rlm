@@ -771,7 +771,8 @@ feedback naming the problem. The component selector only proposes texts the mini
 actually exercised. A run is resumable from its `--run-dir` and ends with
 `best_prompt_overrides.json`, a `prompt_overrides` object any host can send, and
 `report.md` with per-task validation scores and a diff per component. Landing a
-winner in `rlm.prompt` is a reviewed change. Expect roughly 100-250k tokens per rollout
+winner in `rlm.prompt` is a reviewed change. `scripts/gepa/RUNBOOK.md` is the
+step-by-step for a full run. Expect roughly 100-250k tokens per rollout
 and a few hundred rollouts per run. Sessions run inside a checkout and may write to it,
 so ask about this repository through its pinned workspace copy, never the live tree.
 
