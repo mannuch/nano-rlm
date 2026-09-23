@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import sys
 import textwrap
 from pathlib import Path
@@ -324,6 +325,7 @@ def test_bug_mutants_are_verified_by_the_tests_and_fixes_scored(tmp_path: Path):
     assert len(mutants) == 2
     assert all(m.test_files == ["tests/test_pkg.py"] for m in mutants)
     assert all(m.targets == ["tests.test_pkg::test_add_one"] for m in mutants)
+    assert mutants[0].report[0].startswith("`test_add_one`: assert ")
 
     mutation = mutants[0].mutation
     question = Question(
@@ -354,3 +356,13 @@ def test_bug_mutants_are_verified_by_the_tests_and_fixes_scored(tmp_path: Path):
     assert check_fix(question, tmp_path, python, before, set())["note"] == (
         "a test file was edited"
     )
+
+    hidden = tmp_path.parent / "hidden"
+    shutil.copytree(tmp_path / "src", hidden / "src")
+    (hidden / "tests").mkdir()
+    (hidden / "tests" / "mine.py").write_text("# the agent's own check\n")
+    fixed = check_fix(question, hidden, python, snapshot(hidden), set(), tmp_path)
+    assert fixed["score"] == 1.0
+    assert [p.name for p in (hidden / "tests").iterdir()] == ["mine.py"]
+    apply_mutation(hidden, mutation)
+    assert check_fix(question, hidden, python, before, set(), tmp_path)["score"] == 0.0

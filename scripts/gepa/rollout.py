@@ -206,6 +206,7 @@ async def run_rollout(
                     task.setup["python"],
                     files,
                     unresolved,
+                    Path(task.cwd) if task.setup.get("hide_tests") else None,
                 )
                 fix.pop("snapshot")
                 unresolved |= fix.pop("failing")
@@ -483,20 +484,37 @@ def _score_fix(
     if fix is None:
         result.check_note = "the fix was not checked"
         return
-    result.expected = "every test in the file passes"
+    result.expected = "every target test passes"
     result.score, result.check_note, result.patch = (
         fix["score"],
         fix["note"],
         fix["patch"],
     )
-    if any(
-        "site-packages" in c.code
+    own_copy = "/sessions/" + "/".join(Path(rollout.session_dir).parts[-2:]) + "/repo"
+    leaks = {
+        what
         for c in rollout.cells
         if asked_at < c.index < next_asked
-    ):
-        # An installed copy of the package would reveal the unmutated source.
+        for pattern, what in FIX_LEAKS.items()
+        for match in re.finditer(pattern, c.code)
+        if match.group(0) != own_copy
+    }
+    if leaks:
         result.score = 0.0
-        result.check_note += "; read an installed copy under site-packages"
+        result.check_note += "; " + "; ".join(sorted(leaks))
+
+
+FIX_LEAKS = {
+    r"site-packages": "read an installed copy under site-packages",
+    r"pypi\.org|pythonhosted\.org|github\.com|pip3? (?:download|install)": (
+        "fetched the package from the network"
+    ),
+    r"\bfind\s+(?:/|~)": "searched the filesystem outside the repository",
+    r"workspace/[\w.-]+@": "read the unmodified checkout",
+    r"/sessions/[^/\s'\"]+/[0-9a-f]{8}/repo": "read another session's copy",
+}
+"""Ways to recover the unmutated source instead of finding the bug; a fix whose cells
+match one scores zero."""
 
 
 def _expected_for_api(

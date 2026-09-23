@@ -45,13 +45,18 @@ uv run python -c "import json; [print(t['id'], [q['kind'] for q in t['questions'
 
 `bugs.py` builds sessions that fix injected bugs, checked by each repository's own tests:
 three bugs in different source files, introduced one at a time just before the prompt
-that reports their failing tests, then a follow-up about an earlier fix and the history
-question. Mutants that fail 1-25 tests in at most three test files, with no collection
-errors, are kept. Each repository's tests run in a virtualenv under
-`scripts/gepa/workspace/.venvs/` (built from its `requirements/tests.txt` on first use),
-never the one sessions run in. Use repositories whose package is not installed in this
-project's environment, or sessions could read the unmodified source from
-`site-packages` (fixes that do are scored zero).
+that reports them, then a follow-up about an earlier fix and the history question.
+Mutants that fail 1-25 tests in at most three test files, with no collection errors, are
+kept. The session's copy has no `tests/`: each prompt is an issue-style report (up to
+three failing checks, each a test name and the first line of its failure message), and
+the hidden tests are put back only to score the fix. `--show-tests` keeps the tests and
+names the failing files instead (a much easier task: the seed fixed 60/60 that way).
+
+Each repository's tests run in a virtualenv under `scripts/gepa/workspace/.venvs/` (built
+from its `requirements/tests.txt` on first use), never the one sessions run in. A fix
+scores zero when a cell recovers the unmodified source instead of finding the bug:
+reading `site-packages`, fetching from PyPI or GitHub, `pip download`/`install`, `find /`,
+or reading the pristine checkout or another session's copy.
 
 ```bash
 uv run python scripts/gepa/bugs.py \

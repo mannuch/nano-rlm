@@ -4,11 +4,16 @@ A mutant is one small edit to a library function (a flipped comparison, ``and``/
 ``+``/``-``, an integer off by one, a flipped boolean, a dropped ``not``) that makes
 1-25 tests fail across at most three test files, with no collection errors. A session
 works in a private copy of the checkout and introduces its mutants one at a time, each
-in a different source file, right before the prompt that reports its failing tests,
-like bug reports arriving in turn; it ends by asking which file an earlier fix changed.
-A fix scores the share of its target tests that pass, or zero when another test in those
-files fails (earlier bugs' tests that are still failing aside) or a test file was
-edited.
+in a different source file, right before the prompt that reports it, like bug reports
+arriving in turn; it ends by asking which file an earlier fix changed.
+
+By default the copy has no ``tests/`` and each prompt is an issue-style report: up to
+three failing checks, each a test's name and the first line of its failure message, so
+the bug has to be reproduced and located without a traceback. The hidden tests are put
+back only to score the fix. With ``--show-tests`` the tests stay and the prompt names the
+failing test files instead. A fix scores the share of its target tests that pass, or
+zero when another test in those files fails (earlier bugs' tests that are still failing
+aside) or, with visible tests, a test file was edited.
 
     uv run python scripts/gepa/bugs.py --repo itsdangerous=<path> --repo click=<path> \\
         --per-repo 10 --out scripts/gepa/tasks/bugs.jsonl
@@ -34,7 +39,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +70,8 @@ class Mutant:
     test_files: list[str]
     targets: list[str]
     """Test ids (``classname::name``) that fail with the mutation applied."""
+    report: list[str] = field(default_factory=list)
+    """Up to three failing checks: the test's name and its failure message's first line."""
 
 
 # --- mutation sites ----------------------------------------------------------------
@@ -193,6 +200,7 @@ def run_tests(
     python: Path | str,
     test_files: list[str] | None = None,
     timeout: float = TEST_TIMEOUT_S,
+    messages: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Outcome per test id (``passed``/``failed``/``skipped``, or ``error`` for a module
     that failed to collect, as ``::<module>``); empty when pytest did not run or timed
@@ -237,6 +245,12 @@ def run_tests(
                 outcomes[test_id] = "error"
             elif case.find("failure") is not None or case.find("error") is not None:
                 outcomes[test_id] = "failed"
+                if messages is not None:
+                    failure = case.find("failure")
+                    if failure is None:
+                        failure = case.find("error")
+                    text = (failure.get("message") or "").strip()
+                    messages[test_id] = text.splitlines()[0][:240] if text else ""
             elif case.find("skipped") is not None:
                 outcomes[test_id] = "skipped"
             else:
@@ -293,14 +307,20 @@ def _screen(
         files = sorted({_test_file(root, t) for t in failed})
         if len(files) > MAX_TEST_FILES:
             return None
-        targets = _failures(root, python, timeout, files)
+        messages: dict[str, str] = {}
+        outcomes = run_tests(root, python, files, timeout=timeout, messages=messages)
     except SyntaxError:
         return None
     finally:
         file.write_text(original, encoding="utf-8")
-    if not targets:
+    targets = sorted(t for t, v in outcomes.items() if v == "failed")
+    if not targets or "error" in outcomes.values():
         return None
-    return Mutant(mutation, sorted({_test_file(root, t) for t in targets}), targets)
+    lines = dict.fromkeys(f"`{t.split('::', 1)[1]}`: {messages[t]}" for t in targets)
+    report = list(lines)[:3]
+    return Mutant(
+        mutation, sorted({_test_file(root, t) for t in targets}), targets, report
+    )
 
 
 def find_mutants(
@@ -345,7 +365,21 @@ def find_mutants(
     return mutants[:want]
 
 
-def _fix_prompt(mutant: Mutant, python: Path) -> str:
+def _fix_prompt(mutant: Mutant, python: Path, hide_tests: bool) -> str:
+    if hide_tests:
+        checks = "\n".join(f"- {line}" for line in mutant.report)
+        more = (
+            f"({len(mutant.targets)} checks fail in total.)\n\n"
+            if len(mutant.targets) > len(mutant.report)
+            else ""
+        )
+        return (
+            "Bug report: after a recent change to this library, these checks fail:\n\n"
+            f"{checks}\n\n{more}The bug is in the library source under `src/`. Find it "
+            "and fix it. This checkout has no test suite, so reproduce the problem and "
+            "verify your fix another way; run Python against the checkout with "
+            f"`PYTHONPATH=src {python}`. Reply with one line describing the fix."
+        )
     files = ", ".join(f"`{f}`" for f in mutant.test_files)
     return (
         f"Some tests in {files} fail. The bug is in the library source under `src/`, "
@@ -366,6 +400,7 @@ def make_bug_tasks(
     seed: int = 0,
     bugs_per_task: int = 3,
     attempts: int = 400,
+    hide_tests: bool = True,
 ) -> list[Task]:
     """``count`` sessions of ``bugs_per_task`` fixes in different source files, a
     follow-up about an earlier fix, and the history question. Mutants are spread over
@@ -394,7 +429,7 @@ def make_bug_tasks(
         questions = [
             Question(
                 kind="bugfix",
-                text=_fix_prompt(m, python),
+                text=_fix_prompt(m, python, hide_tests),
                 answer=None,
                 path=m.mutation.path,
                 params={
@@ -423,7 +458,7 @@ def make_bug_tasks(
                 repo=name,
                 cwd=str(repo),
                 questions=questions,
-                setup={"python": str(python)},
+                setup={"python": str(python), "hide_tests": hide_tests},
             )
         )
     return tasks
@@ -433,9 +468,13 @@ def make_bug_tasks(
 
 
 def prepare_workdir(task: Task, session_dir: Path) -> Path:
-    """A private copy of the checkout, without ``.git`` or bytecode caches. Absolute,
-    since the kernel starts in it and then changes into it again."""
-    return _copy(Path(task.cwd), session_dir.resolve() / "repo")
+    """A private copy of the checkout, without ``.git``, bytecode caches, or (for hidden
+    tests) ``tests/``. Absolute, since the kernel starts in it and then changes into it
+    again."""
+    root = _copy(Path(task.cwd), session_dir.resolve() / "repo")
+    if task.setup.get("hide_tests"):
+        shutil.rmtree(root / "tests")
+    return root
 
 
 def introduce_bug(question: Question, root: Path) -> None:
@@ -477,16 +516,38 @@ def patch(before: dict[str, str], after: dict[str, str]) -> str:
     return "\n".join(chunks)
 
 
+def _run_hidden_tests(
+    root: Path, python: str, test_files: list[str], pristine: Path
+) -> dict[str, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        own = root / "tests"
+        aside = Path(tmp) / "tests"
+        if own.exists():
+            shutil.move(own, aside)
+        try:
+            shutil.copytree(
+                pristine / "tests", own, ignore=shutil.ignore_patterns("__pycache__")
+            )
+            return run_tests(root, python, test_files)
+        finally:
+            shutil.rmtree(own, ignore_errors=True)
+            if aside.exists():
+                shutil.move(aside, own)
+
+
 def check_fix(
     question: Question,
     root: Path,
     python: str,
     before: dict[str, str],
     unresolved: set[str],
+    pristine: Path | None = None,
 ) -> dict[str, Any]:
     """Score one fix right after its prompt: the share of target tests that pass, zero on
     a regression in the same test files or an edited test file. ``unresolved`` holds
-    earlier bugs' target tests that were still failing, which are not regressions."""
+    earlier bugs' target tests that were still failing, which are not regressions. With
+    ``pristine`` (hidden tests), its ``tests/`` is put in place only for this run, and
+    any ``tests/`` the agent wrote is set aside and restored."""
     after = snapshot(root)
     tests_before = {k: v for k, v in before.items() if k.startswith("tests/")}
     tests_after = {k: v for k, v in after.items() if k.startswith("tests/")}
@@ -496,11 +557,16 @@ def check_fix(
         "snapshot": after,
         "failing": set(targets),
     }
-    if _digest(tests_before) != _digest(tests_after):
+    if pristine is None and _digest(tests_before) != _digest(tests_after):
         return {**result, "score": 0.0, "note": "a test file was edited"}
     for cache in list(root.rglob("__pycache__")):
         shutil.rmtree(cache, ignore_errors=True)
-    outcomes = run_tests(root, python, question.params["test_files"])
+    if pristine is None:
+        outcomes = run_tests(root, python, question.params["test_files"])
+    else:
+        outcomes = _run_hidden_tests(
+            root, python, question.params["test_files"], pristine
+        )
     if not outcomes:
         return {
             **result,
@@ -543,6 +609,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attempts", type=int, default=400)
     parser.add_argument("--python", default="3.12")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--show-tests",
+        action="store_true",
+        help="Keep tests/ in the session and name the failing test files",
+    )
     args = parser.parse_args(argv)
     workspace = Path(args.workspace).resolve()
     tasks: list[Task] = []
@@ -558,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             bugs_per_task=args.bugs_per_task,
             attempts=args.attempts,
+            hide_tests=not args.show_tests,
         )
         print(f"{name}: {len(made)} sessions", flush=True)
         tasks.extend(made)
