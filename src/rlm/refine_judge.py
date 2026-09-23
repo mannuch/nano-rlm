@@ -108,6 +108,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
         "Every entry is consistent with the conversation, or unrelated to it.",
     ),
 }
+"""Gate signal -> ``(instructions, true, false)``: the Noul's question, then the
+``NoulCriteria`` descriptions of its yes and no outcomes."""
 
 HOME_KINDS = {
     "memory": "A memory: a durable fact, decision, failure, preference or outcome.",
