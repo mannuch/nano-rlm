@@ -627,7 +627,9 @@ informs the plan (`focus`, `shadow`) the plan runs without it and the failure is
 as `judge.error`. `scripts/refine_eval/run.py` scores these pieces on labeled, steered
 scenarios: decisions against labels, who declined, focus against expected kinds and
 entries, and applied edits and follow-up probes per arm (`force`, `force+focus`,
-`typesafe`, `none`).
+`typesafe`, `none`). Scenarios can seed either store and run a global pass, covering a
+stale global entry, a global entry a local pass must override, and a session-only fact
+a global pass should decline.
 
 `max_refinements` caps applied passes per engine; `max_refinement_attempts` bounds how
 often an unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is

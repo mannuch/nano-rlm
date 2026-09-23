@@ -23,9 +23,10 @@ _ANSWER_RE = re.compile(r"ANSWER:\s*(.+)")
 
 
 def applied_edits(records: list[dict]) -> list[dict]:
-    """Every applied edit of every refinement in the ledger."""
+    """Every applied edit of every refinement in the ledger, with the scope of the
+    store it was applied to."""
     return [
-        edit
+        {**edit, "scope": record["result"]["scope"]}
         for record in records
         if record.get("type") == "refinement"
         for edit in record["result"]["applied_edits"]
@@ -43,8 +44,11 @@ def rejected_edits(records: list[dict]) -> int:
     )
 
 
-def check_edit(check: EditCheck, edits: list[dict], final: list[dict]) -> bool:
-    """``final`` is the local store's entries after the run, as dicts."""
+def check_edit(
+    check: EditCheck, edits: list[dict], final: dict[str, list[dict]]
+) -> bool:
+    """``final`` maps each store's scope to its entries after the run, as dicts."""
+    edits = [e for e in edits if e["scope"] == check.scope]
     if isinstance(check, Created):
         return any(
             e["action"] == "create"
@@ -72,7 +76,7 @@ def check_edit(check: EditCheck, edits: list[dict], final: list[dict]) -> bool:
         return (
             sum(
                 1
-                for e in final
+                for e in final.get(check.scope, [])
                 if matches(check.pattern, e.get("title"), e.get("content"))
             )
             <= 1
@@ -139,12 +143,12 @@ def grade_case(
     scenario: Scenario,
     arm: str,
     records: list[dict],
-    final: list[dict],
+    final: dict[str, list[dict]],
     probe_answer: str | None,
     threshold: float,
 ) -> dict[str, Any]:
-    """One results row. ``records`` is the session ledger, ``final`` the local store's
-    entries after the run. A pass is applied (a ``refinement`` record) or not (a
+    """One results row. ``records`` is the session ledger, ``final`` each store's
+    entries after the run, by scope. A pass is applied (a ``refinement`` record) or not (a
     ``refinement_declined`` record, whose ``reason`` says who declined)."""
     passes = [
         r
@@ -168,6 +172,7 @@ def grade_case(
     row: dict[str, Any] = {
         "scenario": scenario.id,
         "family": scenario.family,
+        "scope": scenario.scope,
         "arm": arm,
         "expect_refine": scenario.expect_refine,
         "decision": None,

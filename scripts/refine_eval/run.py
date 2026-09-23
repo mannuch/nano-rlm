@@ -58,7 +58,7 @@ class Settings:
     timeout_s: float = 600.0
 
 
-def _config(settings: Settings) -> RuntimeConfig:
+def _config(settings: Settings, global_dir: Path) -> RuntimeConfig:
     return RuntimeConfig(
         model=settings.model,
         provider=ProviderConfig(base_url=settings.base_url, api_key=settings.api_key),
@@ -69,9 +69,10 @@ def _config(settings: Settings) -> RuntimeConfig:
             exec_timeout=settings.exec_timeout,
         ),
         harness=HarnessConfig(
+            global_dir=str(global_dir),
             refine_judge=RefineJudgeConfig(
                 api_key=settings.typesafe_api_key, threshold=settings.threshold
-            )
+            ),
         ),
     )
 
@@ -83,10 +84,16 @@ async def run_case(
     case = f"{scenario.id}.{arm}.{repeat}"
     workspace = root / "workspaces" / case
     session_dir = root / "sessions" / case
+    global_dir = root / "global" / case
     scenario.build(workspace)
-    store = HarnessStore(local_dir(session_dir))
+    stores = {
+        "local": HarnessStore(local_dir(session_dir)),
+        "global": HarnessStore(global_dir, scope="global"),
+    }
     for seed in scenario.seed:
-        store.create(seed.kind, seed.title, seed.content, id=seed.id, source="eval")
+        stores[seed.scope].create(
+            seed.kind, seed.title, seed.content, id=seed.id, source="eval"
+        )
 
     engine: RLMEngine | None = None
     probe_answer = None
@@ -95,7 +102,7 @@ async def run_case(
         engine = RLMEngine(
             cwd=str(workspace),
             session=Session(session_dir),
-            runtime_config=_config(settings),
+            runtime_config=_config(settings, global_dir),
         )
         for text in scenario.steer:
             await asyncio.wait_for(engine.prompt(text), timeout=settings.timeout_s)
@@ -106,7 +113,7 @@ async def run_case(
                     "",
                     refine={
                         "instructions": None,
-                        "global_": False,
+                        "global_": scenario.scope == "global",
                         "rollback_id": None,
                         **request,
                     },
@@ -127,8 +134,10 @@ async def run_case(
             except Exception as exc:  # noqa: BLE001 - keep the case's graded row
                 error = (error or "") + f"\nclose failed: {exc!r}"
 
-    records = read_records(session_dir / "messages.jsonl")
-    final = [e.model_dump() for e in HarnessStore(local_dir(session_dir)).list()]
+    records = list(read_records(session_dir / "messages.jsonl"))
+    final = {
+        scope: [e.model_dump() for e in store.list()] for scope, store in stores.items()
+    }
     row = grade_case(scenario, arm, records, final, probe_answer, settings.threshold)
     row.update(
         repeat=repeat,

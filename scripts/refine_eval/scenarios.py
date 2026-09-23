@@ -15,42 +15,54 @@ from pathlib import Path
 ANSWER_FORMAT = "End your reply with a line `ANSWER: <value>`."
 
 
+Scope = str
+"""A harness store: ``local`` (the session's own) or ``global`` (shared across
+sessions). Every seed and edit check names the store it belongs to."""
+
+
 @dataclass(frozen=True)
 class Seed:
     kind: str
     id: str
     title: str
     content: str
+    scope: Scope = "local"
 
 
 @dataclass(frozen=True)
 class Created:
-    """An applied create of one of ``kinds`` whose title or content matches."""
+    """An applied create in ``scope`` of one of ``kinds`` whose title or content
+    matches."""
 
     kinds: tuple[str, ...]
     pattern: str
+    scope: Scope = "local"
 
 
 @dataclass(frozen=True)
 class Changed:
-    """An applied update or delete of the entry ``kind:id``."""
+    """An applied update or delete of the entry ``kind:id`` in ``scope``."""
 
     kind: str
     id: str
+    scope: Scope = "local"
 
 
 @dataclass(frozen=True)
 class NoCreate:
-    """No applied create matches ``pattern`` (any create when empty)."""
+    """No applied create in ``scope`` matches ``pattern`` (any create when empty)."""
 
     pattern: str = ""
+    scope: Scope = "local"
 
 
 @dataclass(frozen=True)
 class AtMostOne:
-    """At most one entry in the final local store matches ``pattern``: no duplicate."""
+    """At most one entry in the final ``scope`` store matches ``pattern``: no
+    duplicate."""
 
     pattern: str
+    scope: Scope = "local"
 
 
 EditCheck = Created | Changed | NoCreate | AtMostOne
@@ -79,6 +91,9 @@ class Scenario:
     expect_captured: set[str] = field(default_factory=set)
     """Lessons the focus call should veto as already recorded."""
     seed: list[Seed] = field(default_factory=list)
+    scope: Scope = "local"
+    """The store the triggered refinement writes: a ``global`` pass is a host
+    refinement with ``global: true``."""
     edit_checks: list[EditCheck] = field(default_factory=list)
     probe: Probe | None = None
 
@@ -281,9 +296,77 @@ SCENARIOS = [
             AtMostOne(r"uv run pytest"),
         ],
     ),
+    Scenario(
+        id="global_stale_entry",
+        family="global stale entry (global pass)",
+        files={"src/app/config.py": CONFIG_PY},
+        seed=[
+            Seed(
+                "memory",
+                "answer-style",
+                "Answer style",
+                "The user wants answers of one or two sentences, never more.",
+                scope="global",
+            )
+        ],
+        steer=[
+            f"What does `merge` in src/app/config.py do? {ANSWER_FORMAT}",
+            "That's too terse. Across all my projects, not just this one, I now want "
+            "detailed answers that explain the reasoning behind them.",
+        ],
+        lesson_steer=1,
+        scope="global",
+        expect_refine=True,
+        expect_signals={"harness_contradicted", "user_correction", "durable_fact"},
+        expect_entries={"global:answer-style": "wrong"},
+        edit_checks=[
+            Changed("memory", "answer-style", scope="global"),
+            AtMostOne(r"sentence|detail|reasoning|terse", scope="global"),
+        ],
+    ),
+    Scenario(
+        id="global_override",
+        family="contradicted global entry (local pass)",
+        files={"src/app/config.py": CONFIG_PY},
+        seed=[
+            Seed(
+                "memory",
+                "test-command",
+                "Test command",
+                "Run the test suite with `python -m pytest`.",
+                scope="global",
+            )
+        ],
+        steer=[
+            "What command should I use to run the tests here?",
+            "Not in this repo: `python -m pytest` breaks here because of the plugin "
+            "setup. Use `uv run pytest -p no:cacheprovider` in this project.",
+        ],
+        lesson_steer=1,
+        expect_refine=True,
+        expect_signals={"harness_contradicted", "user_correction"},
+        expect_entries={"global:test-command": "wrong"},
+        edit_checks=[
+            Created(("memory", "prompt"), r"uv run pytest"),
+            NoCreate(scope="global"),
+        ],
+    ),
+    Scenario(
+        id="session_fact_global",
+        family="session-only fact (global pass, -)",
+        files={"notes.txt": NOTES},
+        steer=[
+            "For this debugging session only, the staging server is on port 6543. "
+            f"How many lines does notes.txt have? {ANSWER_FORMAT}",
+        ],
+        scope="global",
+        expect_refine=False,
+        edit_checks=[NoCreate(scope="global")],
+    ),
 ]
 
 BY_ID = {s.id: s for s in SCENARIOS}
+assert len(BY_ID) == len(SCENARIOS), "scenario ids must be unique"
 
 
 def matches(pattern: str, *texts: str | None) -> bool:
