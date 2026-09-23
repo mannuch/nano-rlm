@@ -82,7 +82,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
     "delegation_role": (
         "Do the messages in `turns` show the assistant delegating the same kind of "
-        "subtask to child agents (for example with `rlm.agent.spawn`) more than once?",
+        "subtask to child agents (for example by calling rlm.agent.spawn) more than "
+        "once?",
         "Two or more child agents were given the same role or kind of subtask.",
         "No delegation, a single delegation, or delegations of unrelated subtasks.",
     ),
