@@ -81,8 +81,10 @@ def test_prompt_overrides_are_validated_against_the_registry():
         config({"bogus": "x"})
     with pytest.raises(ValueError, match="'task' is empty"):
         config({"task": "  "})
-    with pytest.raises(ValueError, match=r"'review' must contain \['%\(trigger\)s'"):
-        config({"review": "Decide with %(turns)d turns."})
+    with pytest.raises(
+        ValueError, match=r"'refine' must contain \['%\(scope_policy\)s'"
+    ):
+        config({"refine": "Plan edits for %(importable)s."})
     with pytest.raises(ValueError, match="'runtime_reference' must contain"):
         config({"runtime_reference": "## Runtime\nNo slot for the doctrine."})
 

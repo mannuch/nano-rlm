@@ -175,8 +175,8 @@ class _RefineRequest(_ContractModel):
     instructions: str | None = None
     global_: bool = Field(default=False, alias="global")
     rollback_id: str | None = None
-    review: Literal["model", "typesafe"] | None = None
-    """Gate the refinement with this reviewer; a decline is the answer."""
+    review: Literal["typesafe"] | None = None
+    """Gate the refinement with the TypeSafe judge; a decline is the answer."""
     focus: bool = False
     """Have the TypeSafe judge write the refinement's focus instructions."""
 
@@ -438,7 +438,7 @@ class RLMACPAgent(Agent):
             )
         if (
             refine is not None
-            and (refine["review"] == "typesafe" or refine["focus"])
+            and (refine["review"] is not None or refine["focus"])
             and state.engine.runtime_config.harness.refine_judge is None
         ):
             raise RequestError.invalid_params(

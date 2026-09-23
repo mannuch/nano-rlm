@@ -916,25 +916,30 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
         **{REFINE_METADATA_KEY: {"instructions": "focus", "global": True}},
     )
     await agent.prompt(created.session_id, [text_block("work")])
-    await agent.prompt(
-        created.session_id,
-        [text_block("")],
-        **{REFINE_METADATA_KEY: {"review": "model"}},
-    )
     engine = _Engine.instances[0]
-    assert engine.prompts == ["", "work", ""]
-    unreviewed = {"review": None, "focus": False}
+    assert engine.prompts == ["", "work"]
     assert engine.refines == [
-        {"instructions": "focus", "global_": True, "rollback_id": None, **unreviewed},
+        {
+            "instructions": "focus",
+            "global_": True,
+            "rollback_id": None,
+            "review": None,
+            "focus": False,
+        },
         None,
-        {"instructions": None, "global_": False, "rollback_id": None, **unreviewed}
-        | {"review": "model"},
     ]
     with pytest.raises(RequestError) as rejected:
         await agent.prompt(
             created.session_id,
             [text_block("")],
-            **{REFINE_METADATA_KEY: {"rollback_id": "r1", "review": "model"}},
+            **{REFINE_METADATA_KEY: {"review": "model"}},
+        )
+    assert "review" in str(rejected.value.data)
+    with pytest.raises(RequestError) as rejected:
+        await agent.prompt(
+            created.session_id,
+            [text_block("")],
+            **{REFINE_METADATA_KEY: {"rollback_id": "r1", "focus": True}},
         )
     assert "rollback" in str(rejected.value.data)
     for request in ({"review": "typesafe"}, {"focus": True}):
@@ -963,6 +968,23 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
         )
     assert "requires an enabled harness" in str(refused.value.data)
     await agent.close_session(disabled.session_id)
+
+    judged = await agent.new_session(
+        str(tmp_path), **_runtime_metadata(harness={"refine_judge": {"api_key": "k"}})
+    )
+    await agent.prompt(
+        judged.session_id,
+        [text_block("")],
+        **{REFINE_METADATA_KEY: {"review": "typesafe", "focus": True}},
+    )
+    assert _Engine.instances[-1].refines[-1] == {
+        "instructions": None,
+        "global_": False,
+        "rollback_id": None,
+        "review": "typesafe",
+        "focus": True,
+    }
+    await agent.close_session(judged.session_id)
 
 
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 
 from rlm.compaction import CHECKPOINT_PROMPT, ROLLUP_PROMPT, STAIRCASE_FRAMING
 from rlm.harness import KINDS, HarnessView, format_entry, query_terms, score_entry
-from rlm.refinement import REFINE_PROMPT, REVIEW_PROMPT
+from rlm.refinement import REFINE_PROMPT
 
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
@@ -434,7 +434,6 @@ DEFAULT_PROMPTS: dict[str, str] = {
     "checkpoint": CHECKPOINT_PROMPT,
     "rollup": ROLLUP_PROMPT,
     "staircase_framing": STAIRCASE_FRAMING,
-    "review": REVIEW_PROMPT,
     "refine": REFINE_PROMPT,
 }
 """Every prompt text a runtime contract may override, by name."""
@@ -442,7 +441,6 @@ DEFAULT_PROMPTS: dict[str, str] = {
 REQUIRED_PROMPT_MARKERS: dict[str, tuple[str, ...]] = {
     "runtime_reference": (REPL_DOCTRINE_SLOT,),
     "delegation_reference": (DELEGATION_DOCTRINE_SLOT,),
-    "review": ("%(trigger)s", "%(turns)d"),
     "refine": ("%(importable)s", "%(scope_policy)s"),
 }
 """Substrings an override must keep for the runtime to fill it in."""

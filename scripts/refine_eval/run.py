@@ -38,10 +38,10 @@ ARMS: dict[str, dict[str, Any] | None] = {
     "none": None,
     "force": {},
     "force+focus": {"focus": True},
-    "model-gate": {"review": "model"},
     "typesafe": {"review": "typesafe"},
 }
-"""Host refine requests; ``none`` runs no refinement and is a probe control."""
+"""Host refine requests. In every refining arm the planner may still decline with no
+edits; ``typesafe`` lets the judge decline first. ``none`` is a probe control."""
 SWEEP = [round(0.3 + 0.1 * i, 2) for i in range(7)]
 
 

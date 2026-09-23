@@ -23,14 +23,22 @@ def _edit(action, kind, id, content="", applied=True):
     }
 
 
-def _ledger(steer, review, edits):
+def _ledger(steer, outcome, edits):
     records = [
         {"type": "user", "content": text, "message_index": 10 * i}
         for i, text in enumerate(steer)
     ]
-    records.append({"type": "refinement_review", "reason": "host", **review})
     if edits:
-        records.append({"type": "refinement", "result": {"applied_edits": edits}})
+        records.append(
+            {
+                "type": "refinement",
+                "trigger": "host",
+                "result": {"applied_edits": edits},
+                **outcome,
+            }
+        )
+    else:
+        records.append({"type": "refinement_declined", "trigger": "host", **outcome})
     return records
 
 
@@ -76,7 +84,7 @@ def test_grade_case_scores_gate_focus_and_edits():
     edits = [_edit("update", "memory", "test-command", "uv run pytest")]
     records = _ledger(
         scenario.steer,
-        {"should_refine": True, "rationale": "fired", "judge": judge},
+        {"judge": {"mode": "gate", **judge}},
         edits,
     )
     final = [{"title": "Test command", "content": "uv run pytest"}]
@@ -90,17 +98,23 @@ def test_grade_case_scores_gate_focus_and_edits():
 
     declined = grade_case(
         BY_ID["one_off"],
-        "model-gate",
-        _ledger(BY_ID["one_off"].steer, {"should_refine": False, "rationale": "x"}, []),
+        "force",
+        _ledger(
+            BY_ID["one_off"].steer, {"reason": "no_edits", "rationale": "noise"}, []
+        ),
         [],
         None,
         0.7,
     )
     assert declined["decision"] is False and declined["judge"] is None
+    assert declined["declined_by"] == "no_edits"
 
-    rendered = report([row, declined], [0.5, 0.9])
+    failed = {**declined, "declined_by": "failed"}
+    rendered = report([row, declined, failed], [0.5, 0.9])
+    assert "3 cases, 1 errored or failed." in rendered
     assert "| typesafe | 1.00 | 1.00 | 1.00 | - |" in rendered
-    assert "| model-gate | 1.00 |" in rendered
+    assert "| force | 1.00 |" in rendered
+    assert "| force | decline | 0 | 0 | 1 |" in rendered
     assert sweep([row], [0.95]) == [
         "| threshold | call-1 accuracy |",
         "|---|---|",

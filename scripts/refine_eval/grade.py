@@ -18,7 +18,7 @@ from scenarios import (
     matches,
 )
 
-GATED_ARMS = ("model-gate", "typesafe")
+REFINING_ARMS = ("force", "force+focus", "typesafe")
 _ANSWER_RE = re.compile(r"ANSWER:\s*(.+)")
 
 
@@ -144,13 +144,15 @@ def grade_case(
     threshold: float,
 ) -> dict[str, Any]:
     """One results row. ``records`` is the session ledger, ``final`` the local store's
-    entries after the run."""
-    reviews = [
+    entries after the run. A pass is applied (a ``refinement`` record) or not (a
+    ``refinement_declined`` record, whose ``reason`` says who declined)."""
+    passes = [
         r
         for r in records
-        if r.get("type") == "refinement_review" and r.get("reason") == "host"
+        if r.get("type") in ("refinement", "refinement_declined")
+        and r.get("trigger") == "host"
     ]
-    review = reviews[-1] if reviews else None
+    last = passes[-1] if passes else None
     lesson_index = None
     if scenario.lesson_steer is not None:
         text = scenario.steer[scenario.lesson_steer]
@@ -169,7 +171,8 @@ def grade_case(
         "arm": arm,
         "expect_refine": scenario.expect_refine,
         "decision": None,
-        "rationale": review["rationale"] if review else None,
+        "declined_by": last.get("reason") if last else None,
+        "rationale": last.get("rationale") if last else None,
         "edits": [f"{e['action']} {e['kind']}:{e['id']}" for e in edits],
         "rejected_edits": rejected_edits(records),
         "edit_checks": {
@@ -182,12 +185,12 @@ def grade_case(
         if scenario.probe is not None
         else None,
         "judge": None,
-        "judge_error": review.get("judge_error") if review else None,
+        "judge_error": (last.get("judge") or {}).get("error") if last else None,
     }
-    if arm in GATED_ARMS:
-        row["decision"] = bool(review and review["should_refine"])
-    judge = review and (review.get("judge") or review.get("shadow"))
-    if judge:
+    if arm in REFINING_ARMS:
+        row["decision"] = bool(last and last["type"] == "refinement")
+    judge = last and last.get("judge")
+    if judge and "error" not in judge:
         row["judge"] = judge_scores(scenario, judge, lesson_index, threshold)
         row["judge"]["gate"] = judge["gate"]
         row["judge"]["usage"] = judge["usage"]
@@ -207,7 +210,7 @@ def gate_table(rows: list[dict]) -> list[str]:
         "| arm | accuracy | precision | recall | negatives declined |",
         "|---|---|---|---|---|",
     ]
-    for arm in GATED_ARMS:
+    for arm in REFINING_ARMS:
         cases = [r for r in rows if r["arm"] == arm]
         if not cases:
             continue
@@ -222,6 +225,31 @@ def gate_table(rows: list[dict]) -> list[str]:
             f"| {arm} | {accuracy:.2f} | {precision:.2f} | {recall:.2f} | "
             f"{_rate(negatives)} |"
         )
+    return lines
+
+
+def outcome_table(rows: list[dict]) -> list[str]:
+    """Per arm: how passes ended, split by who declined (the judge's gate or the
+    planner proposing no edits), for positive and negative scenarios."""
+    lines = [
+        "| arm | label | applied | declined by judge | declined by planner |",
+        "|---|---|---|---|---|",
+    ]
+    for arm in REFINING_ARMS:
+        for label in (True, False):
+            cases = [r for r in rows if r["arm"] == arm and r["expect_refine"] is label]
+            if not cases:
+                continue
+            counts = [
+                sum(r["decision"] for r in cases),
+                sum(r["declined_by"] == "gate" for r in cases),
+                sum(r["declined_by"] == "no_edits" for r in cases),
+            ]
+            lines.append(
+                f"| {arm} | {'refine' if label else 'decline'} | "
+                + " | ".join(str(c) for c in counts)
+                + " |"
+            )
     return lines
 
 
@@ -284,10 +312,12 @@ def sweep(rows: list[dict], thresholds: list[float]) -> list[str]:
 
 
 def report(rows: list[dict], thresholds: list[float]) -> str:
-    """Markdown summary; errored cases are counted but left out of every table."""
-    ok = [r for r in rows if not r.get("error")]
+    """Markdown summary; errored cases and failed passes are counted but left out of
+    every table."""
+    ok = [r for r in rows if not r.get("error") and r.get("declined_by") != "failed"]
     sections = [
-        ("Gate: decision vs label", gate_table(ok)),
+        ("Decision vs label", gate_table(ok)),
+        ("Pass outcomes", outcome_table(ok)),
         ("Edit checks / probe score by family", family_table(ok)),
         ("Judge focus", judge_table(ok)),
         ("Call-1 threshold sweep (typesafe arm)", sweep(ok, thresholds)),
@@ -296,6 +326,7 @@ def report(rows: list[dict], thresholds: list[float]) -> str:
         f"## {title}\n\n" + "\n".join(lines) for title, lines in sections
     )
     return (
-        f"# Refinement eval\n\n{len(rows)} cases, {len(rows) - len(ok)} errored.\n\n"
+        f"# Refinement eval\n\n{len(rows)} cases, {len(rows) - len(ok)} errored or "
+        "failed.\n\n"
         f"{body}\n"
     )

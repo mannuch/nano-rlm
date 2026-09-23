@@ -46,7 +46,8 @@ class RefinementApplied:
     edits_applied: int
     edits_rejected: int
     review_only: bool = False
-    """True for an auto-refine review that decided not to refine."""
+    """True for the record of an automatic pass reaching a decision, applied or
+    declined; counted as ``num_auto_refine_reviews``."""
 
 
 BuiltinMetricEvent = IpythonExecuted | CompactionApplied | RefinementApplied

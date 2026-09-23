@@ -102,10 +102,10 @@ agent identity metadata.
 are the keys of `rlm.prompt.DEFAULT_PROMPTS`: the system prompt's `task` line and the
 `repl_doctrine` and `delegation_doctrine` paragraphs; the reference sections they sit in
 (`runtime_reference`, `delegation_reference`, `history`, `harness_api`); the compaction
-texts `checkpoint`, `rollup` and `staircase_framing`; and the refinement texts `review`
-and `refine`. Unknown names and empty texts are rejected, as is a text that drops a marker
-the runtime fills in (`<repl_doctrine>` inside `runtime_reference`, `%(trigger)s` in
-`review`, ...). `system_prompt_path` still replaces the task role entirely. The
+texts `checkpoint`, `rollup` and `staircase_framing`; and the refinement planning text
+`refine`. Unknown names and empty texts are rejected, as is a text that drops a marker
+the runtime fills in (`<repl_doctrine>` inside `runtime_reference`, `%(scope_policy)s`
+in `refine`, ...). `system_prompt_path` still replaces the task role entirely. The
 `session/close` snapshot lists the overridden names under `limits.prompt_overrides`.
 
 The generated guide distinguishes Python state from supervisor-owned resources,
@@ -549,6 +549,13 @@ changed while planning, …) are recorded with an error and the rest still apply
 store's `refinements.jsonl` holds one full result per pass with per-edit `before`/`after`
 snapshots; a rollback replays those snapshots in reverse and needs no model call.
 
+The planning call also decides whether to refine at all: a proposal with an empty `edits`
+array declines the pass. A declined pass changes nothing (no store write, no rebuilt
+window, no `refinement` edge) and is recorded as a `refinement_declined` ledger record with
+the planner's rationale; only a kernel-requested pass tells the model, in context. An
+applied pass is a `refinement` record. Both records carry the `trigger`, any compaction
+`blocks` behind the pass and, when the TypeSafe judge ran, its verdict under `judge`.
+
 Three triggers, all of which run between model calls and never inside a cell:
 
 - **Kernel**: `await rlm.refine.run(instructions=None, global_=False, rollback_id=None)`
@@ -557,31 +564,30 @@ Three triggers, all of which run between model calls and never inside a cell:
 - **Host**: `session/prompt` may carry `ai.prime.rlm/refine-v1` in `_meta`:
   `{"instructions": "...", "global": false, "rollback_id": null, "review": null, "focus": false}`.
   The pass runs before the turn; with an empty prompt it is the whole turn and the notice
-  is the answer (`stop_reason` `refined`). `review` (`"model"` or `"typesafe"`) gates the
-  pass with that reviewer, and a decline becomes the answer
-  (`[refinement declined: <rationale>]`); `focus` has the TypeSafe judge write the
-  plan's focus instructions, with any host `instructions` appended after them. A rollback
-  takes neither. The key is refused when the harness is disabled, and `review:
-  "typesafe"` or `focus` is refused without `refine_judge`.
+  (or `[refinement declined: <rationale>]`) is the answer (`stop_reason` `refined`).
+  `review: "typesafe"` lets the TypeSafe judge decline the pass before any model call;
+  `focus` has the judge write the plan's focus instructions, with any host `instructions`
+  appended after them. A rollback takes neither. The key is refused when the harness is
+  disabled, and `review` or `focus` is refused without `refine_judge`.
 - **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
-  work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
-  review call decides whether the trajectory holds evidence worth persisting; only an
-  approving review triggers a plan. After a compaction the review also receives the blocks
-  that compaction produced (the branch summary and any rollups it sealed) as a
-  `<compaction_blocks>` section, with the hint that a failure, tactic or fact recurring
-  across blocks is evidence for a durable entry while one branch's progress is not; an
-  approved review hands the same blocks to the plan as `<evidence>`. Both are side calls
-  with `tool_choice="none"`, so the evidence is the block text itself, never a pointer to
-  follow. The `refinement_review` ledger record lists the block keys.
+  work turns and after each compaction, subject to `refine_cooldown_seconds`, a planning
+  call runs with an `<automatic_refinement>` section: the pass was not requested, so edit
+  only on evidence useful to this session's future turns (a repeated failure, a reusable
+  tactic, a repeated delegation role, a durable fact or preference, a user correction) and
+  otherwise decline with no edits. After a compaction the plan also receives the blocks that
+  compaction produced (the branch summary and any rollups it sealed) as `<evidence>`, with
+  the hint that a failure, tactic or fact recurring across blocks is evidence for a durable
+  entry while one branch's progress is not. The call runs with `tool_choice="none"`, so the
+  evidence is the block text itself, never a pointer to follow.
 
 #### TypeSafe review judge
 
-`refine_judge` hands reviews to TypeSafe's System One model (Jev), which answers typed
-yes/no and choice questions with calibrated probabilities; the task model still writes
-the plan. It is opt-in, root agent only, and sends a compact evidence state to the
-TypeSafe API: the messages since the last review (clipped, newest first, user turns kept
-ahead of the rest), exception counts, the compaction blocks under review and the visible
-harness entries.
+`refine_judge` puts TypeSafe's System One model (Jev) in front of the planning call. Jev
+answers typed yes/no and choice questions with calibrated probabilities; the task model
+still writes the plan and may still decline it. The judge is opt-in, root agent only, and
+sends a compact evidence state to the TypeSafe API: the messages since the last pass
+(clipped, newest first, user turns kept ahead of the rest), exception counts, the
+compaction blocks behind the pass and the visible harness entries.
 
 ```json
 "refine_judge": {
@@ -605,23 +611,28 @@ which kind should hold it; per local entry, whether it covers a lesson or is con
 per turn, whether it is direct evidence. Code turns the answers into deterministic plan
 instructions naming the home kind (one kind when the choice's confidence reaches
 `home_confidence`), the entries to update or delete, and quotes of the strongest turns.
+They reach the planner as `<refine_instructions>`, the same slot host and kernel
+instructions use.
 
-`mode: "gate"` replaces the auto-refine model review; `"shadow"` keeps the model review
-deciding and logs the judge's verdict beside it. Every `refinement_review` record carries
-the `reviewer`, the judge's gate and focus probabilities, the evidence turns it chose, and
-TypeSafe token usage per call; a judge failure fails a TypeSafe-gated review and is only
-recorded (`judge_error`) where the judge informs another reviewer.
-`scripts/refine_eval/run.py` scores these pieces on labeled, steered scenarios: gate
-decisions against labels, focus against expected kinds and entries, and applied edits and
-follow-up probes per arm (`force`, `force+focus`, `model-gate`, `typesafe`, `none`).
+`mode: "gate"` lets the judge decline automatic passes before any model call; `"shadow"`
+leaves the decision to the planner and only records the judge's verdict. The pass record's
+`judge` holds the mode, the gate and focus probabilities, the evidence turns it chose and
+TypeSafe token usage per call. A judge failure fails a gated pass; where the judge only
+informs the plan (`focus`, `shadow`) the plan runs without it and the failure is recorded
+as `judge.error`. `scripts/refine_eval/run.py` scores these pieces on labeled, steered
+scenarios: decisions against labels, who declined, focus against expected kinds and
+entries, and applied edits and follow-up probes per arm (`force`, `force+focus`,
+`typesafe`, `none`).
 
-`max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
-unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
-reported as failed in the conversation and the run continues. Plan and review calls carry
-`refinement_attempt` semantic edges from the last work request; the applied plan request
-becomes the source of a `refinement` edge into the next work request, which also keeps its
-ordinary `continuation` edge. Refinement counts and edit totals appear in the session
-metrics; the `session-v1` snapshot carries per-scope entry counts under `harness`.
+`max_refinements` caps applied passes per engine; `max_refinement_attempts` bounds how
+often an unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
+reported as failed in the conversation and the run continues. A pass is one planning
+request (plus any resampled attempts), each carrying a `refinement_attempt` semantic edge
+from the last work request; an applied plan becomes the source of a `refinement` edge into
+the next work request, which also keeps its ordinary `continuation` edge. A declined plan
+is a dead end, and a pass the judge declines makes no request at all. Refinement counts and
+edit totals appear in the session metrics; the `session-v1` snapshot carries per-scope entry
+counts under `harness`.
 
 ### Episodes
 

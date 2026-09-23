@@ -122,7 +122,7 @@ class JudgeVerdict:
     """The judge's answer to one review.
 
     ``gate_decision`` is what the judge decides on its own; ``should_refine`` is the
-    decision it returns, which is always True when another reviewer gates.
+    decision it returns, which is always True for a pass the judge does not gate.
     """
 
     should_refine: bool
@@ -138,7 +138,7 @@ class JudgeVerdict:
     usage: dict[str, dict[str, int | None]] = field(default_factory=dict)
 
     def record(self) -> dict[str, Any]:
-        """The ledger form, stored on the ``refinement_review`` record."""
+        """The ledger form, stored under ``judge`` on the pass's ledger record."""
         return {
             "gate_decision": self.gate_decision,
             "rationale": self.rationale,
@@ -457,8 +457,9 @@ def _usage(response: Any) -> dict[str, int | None]:
 
 
 class RefineJudge:
-    """Runs the two-call review against TypeSafe. ``force=True`` is for reviews another
-    reviewer gates: call 1 only selects the lessons for call 2 and cannot decline."""
+    """Runs the two-call review against TypeSafe. ``force=True`` is for passes the
+    judge does not gate (focus, shadow): call 1 only selects the lessons for call 2
+    and cannot decline."""
 
     def __init__(
         self, config: RefineJudgeConfig, client: AsyncTypeSafeClient | None = None
