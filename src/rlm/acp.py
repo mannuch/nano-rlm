@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from importlib.metadata import version
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from acp import (
     PROTOCOL_VERSION,
@@ -175,14 +175,14 @@ class _RefineRequest(_ContractModel):
     instructions: str | None = None
     global_: bool = Field(default=False, alias="global")
     rollback_id: str | None = None
-    review: Literal["typesafe"] | None = None
+    review: bool = False
     """Gate the refinement with the TypeSafe judge; a decline is the answer."""
     focus: bool = False
     """Have the TypeSafe judge write the refinement's focus instructions."""
 
     @model_validator(mode="after")
     def _rollback_is_unreviewed(self) -> Self:
-        if self.rollback_id is not None and (self.review is not None or self.focus):
+        if self.rollback_id is not None and (self.review or self.focus):
             raise ValueError("a rollback takes no review or focus")
         return self
 
@@ -438,7 +438,7 @@ class RLMACPAgent(Agent):
             )
         if (
             refine is not None
-            and (refine["review"] is not None or refine["focus"])
+            and (refine["review"] or refine["focus"])
             and state.engine.runtime_config.harness.refine_judge is None
         ):
             raise RequestError.invalid_params(

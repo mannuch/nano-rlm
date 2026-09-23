@@ -923,7 +923,7 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
             "instructions": "focus",
             "global_": True,
             "rollback_id": None,
-            "review": None,
+            "review": False,
             "focus": False,
         },
         None,
@@ -932,7 +932,7 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
         await agent.prompt(
             created.session_id,
             [text_block("")],
-            **{REFINE_METADATA_KEY: {"review": "model"}},
+            **{REFINE_METADATA_KEY: {"review": "typesafe"}},
         )
     assert "review" in str(rejected.value.data)
     with pytest.raises(RequestError) as rejected:
@@ -942,7 +942,7 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
             **{REFINE_METADATA_KEY: {"rollback_id": "r1", "focus": True}},
         )
     assert "rollback" in str(rejected.value.data)
-    for request in ({"review": "typesafe"}, {"focus": True}):
+    for request in ({"review": True}, {"focus": True}):
         with pytest.raises(RequestError) as rejected:
             await agent.prompt(
                 created.session_id, [text_block("")], **{REFINE_METADATA_KEY: request}
@@ -975,13 +975,13 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
     await agent.prompt(
         judged.session_id,
         [text_block("")],
-        **{REFINE_METADATA_KEY: {"review": "typesafe", "focus": True}},
+        **{REFINE_METADATA_KEY: {"review": True, "focus": True}},
     )
     assert _Engine.instances[-1].refines[-1] == {
         "instructions": None,
         "global_": False,
         "rollback_id": None,
-        "review": "typesafe",
+        "review": True,
         "focus": True,
     }
     await agent.close_session(judged.session_id)

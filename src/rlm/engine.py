@@ -473,7 +473,7 @@ class RLMEngine:
                     instructions=refine.get("instructions"),
                     global_=refine.get("global_", False),
                     rollback_id=refine.get("rollback_id"),
-                    gate=refine.get("review") == "typesafe",
+                    gate=refine.get("review", False),
                     focus=refine.get("focus", False),
                 )
             if refine is not None and not prompt.strip():

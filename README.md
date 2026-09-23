@@ -562,10 +562,10 @@ Three triggers, all of which run between model calls and never inside a cell:
   returns `{"scheduled": True}` (or a reason) and the pass runs at the next boundary;
   `await rlm.refine.status()` reports `pending`/`in_flight`.
 - **Host**: `session/prompt` may carry `ai.prime.rlm/refine-v1` in `_meta`:
-  `{"instructions": "...", "global": false, "rollback_id": null, "review": null, "focus": false}`.
+  `{"instructions": "...", "global": false, "rollback_id": null, "review": false, "focus": false}`.
   The pass runs before the turn; with an empty prompt it is the whole turn and the notice
   (or `[refinement declined: <rationale>]`) is the answer (`stop_reason` `refined`).
-  `review: "typesafe"` lets the TypeSafe judge decline the pass before any model call;
+  `review: true` lets the TypeSafe judge decline the pass before any model call;
   `focus` has the judge write the plan's focus instructions, with any host `instructions`
   appended after them. A rollback takes neither. The key is refused when the harness is
   disabled, and `review` or `focus` is refused without `refine_judge`.

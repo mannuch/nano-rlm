@@ -38,7 +38,7 @@ ARMS: dict[str, dict[str, Any] | None] = {
     "none": None,
     "force": {},
     "force+focus": {"focus": True},
-    "typesafe": {"review": "typesafe"},
+    "typesafe": {"review": True},
 }
 """Host refine requests. In every refining arm the planner may still decline with no
 edits; ``typesafe`` lets the judge decline first. ``none`` is a probe control."""

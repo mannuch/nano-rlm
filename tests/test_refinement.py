@@ -590,7 +590,7 @@ async def test_host_review_and_focus_by_the_judge(session):
     host = {"instructions": "keep", "global_": False, "rollback_id": None}
     await engine.prompt("hello")
 
-    declined = await engine.prompt("", refine={**host, "review": "typesafe"})
+    declined = await engine.prompt("", refine={**host, "review": True})
     assert declined.answer.startswith("[refinement declined: no signal reached")
     assert len(client.calls) == 1
 
