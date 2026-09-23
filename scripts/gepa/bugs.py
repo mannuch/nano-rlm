@@ -433,8 +433,9 @@ def make_bug_tasks(
 
 
 def prepare_workdir(task: Task, session_dir: Path) -> Path:
-    """A private copy of the checkout, without ``.git`` or bytecode caches."""
-    return _copy(Path(task.cwd), session_dir / "repo")
+    """A private copy of the checkout, without ``.git`` or bytecode caches. Absolute,
+    since the kernel starts in it and then changes into it again."""
+    return _copy(Path(task.cwd), session_dir.resolve() / "repo")
 
 
 def introduce_bug(question: Question, root: Path) -> None:
