@@ -489,10 +489,13 @@ async def test_auto_refine_plans_on_interval_and_an_empty_plan_declines(session)
 HOME_MEMORY = {"choice": "memory", "confidence": 0.9, "probabilities": {"memory": 0.9}}
 
 
-def _judged_engine(client, session, answers, *, auto_refine=True, **judge):
+def _judged_engine(
+    client, session, answers, *, auto_refine=True, global_dir=None, **judge
+):
     config = make_runtime_config(
         harness=HarnessConfig(
             auto_refine=auto_refine,
+            global_dir=global_dir,
             refine_turn_interval=1,
             refine_cooldown_seconds=0,
             refine_judge=RefineJudgeConfig(api_key="k", **judge),
@@ -612,6 +615,47 @@ async def test_host_review_and_focus_by_the_judge(session):
         ("host", "no_edits", "focus"),
     ]
     assert not any("message" in r for r in passes)
+
+
+async def test_host_global_pass_is_judged_against_the_global_store(session, tmp_path):
+    """A global pass shows the judge the global store first, with its refinement
+    history, and points the planner at the global entry the conversation contradicts."""
+    global_dir = tmp_path / "global"
+    HarnessStore(global_dir, scope="global").create(
+        "memory", "Style", "answers are short"
+    )
+    client = DummyClient(
+        [DummyMessage(content="hi"), DummyMessage(content=_proposal([]))]
+    )
+    engine, fake = _judged_engine(
+        client,
+        session,
+        [{"harness_contradicted": 0.9}, {"wrong_0": 0.9}],
+        auto_refine=False,
+        global_dir=str(global_dir),
+    )
+    await engine.prompt("we want long answers now")
+
+    await engine.prompt(
+        "",
+        refine={
+            "instructions": None,
+            "global_": True,
+            "rollback_id": None,
+            "focus": True,
+        },
+    )
+
+    state = fake.calls[0][0]
+    assert state["scope"] == "global"
+    assert state["harness_entries"][0]["ref"] == "global:style"
+    assert state["recent_refinements"] == ["No prior refinements."]
+    plan = client.calls[1]["messages"][-1]["content"]
+    assert "Requested scope: global" in plan
+    assert (
+        "Entry global:style is contradicted by the conversation: update or delete"
+        in (plan)
+    )
 
 
 async def test_auto_refine_after_compaction_plans_on_the_new_blocks(session):

@@ -7,8 +7,12 @@ whole conversation does not fit Jev's 32k-token state budget):
    or above the threshold become the lessons of the review; none fired declines it.
 2. focus: asked only about the lessons that fired, stated as premises in the state.
    Per lesson: is it already recorded (a veto) and which harness kind should hold it.
-   Per local entry: does it cover a lesson, and is it contradicted. Per turn: is it
-   direct evidence for a lesson.
+   Per entry of the store the pass writes: does it cover a lesson, and is it
+   contradicted; in a local pass, per read-only entry: is it contradicted, so a local
+   entry should override it. Per turn: is it direct evidence for a lesson.
+
+Questions are worded for the pass's scope: a local pass serves later tasks in this
+session, a global pass future sessions.
 
 Code turns the answers into a verdict and deterministic instructions for the planning
 call, which the task model still makes.
@@ -25,7 +29,7 @@ from typing import Any
 from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul, NoulCriteria, Question
 
 from rlm.config import RefineJudgeConfig
-from rlm.harness import HarnessView, compact
+from rlm.harness import HarnessScope, HarnessView, compact
 from rlm.provenance import AGENT_INPUT, RUNTIME_EVENT
 from rlm.refinement import BLOCK_SUMMARY_CHARS, RefinementResult, history_for_prompt
 from rlm.staircase import Block
@@ -56,11 +60,18 @@ LESSON_SIGNALS = (
 CONTRADICTED = "harness_contradicted"
 GATE_SIGNALS = (*LESSON_SIGNALS, CONTRADICTED)
 
+HORIZONS = {
+    "local": "later tasks in this session",
+    "global": "tasks in future sessions",
+}
+"""Who a pass's edits serve, by the scope of the store it writes: ``{horizon}`` in the
+question and lesson texts below."""
+
 LESSONS = {
     "repeated_failure": "the same error or failed approach happened more than once",
-    "reusable_tactic": "a technique that worked and would help later tasks",
+    "reusable_tactic": "a technique that worked and would help {horizon}",
     "delegation_role": "the same kind of subtask was delegated to child agents repeatedly",
-    "durable_fact": "a project fact or user preference that later tasks will need",
+    "durable_fact": "a project fact or user preference that {horizon} will need",
     "user_correction": "a user message corrected the assistant or redirected its work",
 }
 
@@ -75,9 +86,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
     "reusable_tactic": (
         "Do the messages in `turns` show a technique, command or procedure that worked "
-        "and would help with later, different tasks in this workspace?",
-        "A concrete approach succeeded and could be reused on another question in the "
-        "same workspace.",
+        "and would help with {horizon}?",
+        "A concrete approach succeeded and could be reused on {horizon}.",
         "Nothing that worked generalizes beyond the answer to one question.",
     ),
     "delegation_role": (
@@ -89,10 +99,10 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
     "durable_fact": (
         "Do the messages in `turns` establish a fact about the project or workspace, or "
-        "a preference of the user, that later tasks in this session will need again?",
+        "a preference of the user, that {horizon} will need again?",
         "A lasting fact or preference: a convention, a location, a required flag, a "
         "format the user wants.",
-        "Only one-off answers and transient progress; nothing later tasks would need.",
+        "Only one-off answers and transient progress; nothing {horizon} would need.",
     ),
     "user_correction": (
         'Does a message in `turns` with role "user" correct the assistant or tell it to '
@@ -109,7 +119,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
 }
 """Gate signal -> ``(instructions, true, false)``: the Noul's question, then the
-``NoulCriteria`` descriptions of its yes and no outcomes."""
+``NoulCriteria`` descriptions of its yes and no outcomes. ``{horizon}`` is filled
+from ``HORIZONS``."""
 
 HOME_KINDS = {
     "memory": "A memory: a durable fact, decision, failure, preference or outcome.",
@@ -220,12 +231,15 @@ def build_evidence(
     messages: list[tuple[int, dict]],
     view: HarnessView,
     history: list[RefinementResult],
+    scope: HarnessScope = "local",
     blocks: list[Block] | None = None,
     max_chars: int = EVIDENCE_CHARS,
 ) -> dict[str, Any]:
     """The judge's state: the conversation since the last review as short turns, the
     compaction blocks under review, and the harness entries a refinement could touch.
 
+    ``scope`` is the store the pass writes and ``history`` that store's refinements.
+    Entries of that store come first, so the entry cap drops read-only ones first.
     Turns are trimmed newest first to fit ``max_chars``; user turns are kept ahead of
     the rest because corrections are a primary signal.
     """
@@ -238,12 +252,13 @@ def build_evidence(
             "title": entry.title,
             "content": compact(entry.content, ENTRY_CONTENT_CHARS),
         }
-        for layer, entry in view.entries()
+        for layer, entry in sorted(view.entries(), key=lambda item: item[0] != scope)
         if entry.kind != "episode"
     ][:MAX_ENTRIES]
     evidence: dict[str, Any] = {
         "task": compact(task, TASK_CHARS),
         "trigger": trigger,
+        "scope": scope,
         "turns": [],
         "error_counts": dict(errors),
         "harness_entries": entries,
@@ -280,8 +295,11 @@ def _noul(instructions: str, true: str, false: str) -> Noul:
 def gate_questions(evidence: dict[str, Any]) -> dict[str, Question]:
     """Call 1: one Noul per gate signal. The contradiction check is asked only when
     there are entries to contradict."""
+    horizon = HORIZONS[evidence["scope"]]
     return {
-        signal: _noul(*_GATE_QUESTIONS[signal])
+        signal: _noul(
+            *(text.format(horizon=horizon) for text in _GATE_QUESTIONS[signal])
+        )
         for signal in GATE_SIGNALS
         if signal != CONTRADICTED or evidence["harness_entries"]
     }
@@ -298,18 +316,40 @@ def focus_state(evidence: dict[str, Any], fired: list[str]) -> dict[str, Any]:
     return {
         **evidence,
         "gate": {
-            "fired": [{"id": s, "lesson": LESSONS[s]} for s in fired if s in LESSONS],
+            "fired": [
+                {"id": s, "lesson": lesson(s, evidence["scope"])}
+                for s in fired
+                if s in LESSONS
+            ],
             "harness_contradicted": CONTRADICTED in fired,
         },
     }
 
 
-def _local_entries(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
+def lesson(signal: str, scope: HarnessScope) -> str:
+    return LESSONS[signal].format(horizon=HORIZONS[scope])
+
+
+def _editable(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
+    """Entries of the store the pass writes (entry layers are named like scopes)."""
     return [
         (k, entry)
         for k, entry in enumerate(evidence["harness_entries"])
-        if entry["ref"].startswith("local:")
+        if entry["ref"].startswith(f"{evidence['scope']}:")
     ][:MAX_ENTRY_QUESTIONS]
+
+
+def _overridable(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
+    """Read-only entries a local pass can override with a local entry when they are
+    contradicted: ancestor and global ones. A global pass has none."""
+    if evidence["scope"] != "local":
+        return []
+    room = MAX_ENTRY_QUESTIONS - len(_editable(evidence))
+    return [
+        (k, entry)
+        for k, entry in enumerate(evidence["harness_entries"])
+        if not entry["ref"].startswith("local:")
+    ][: max(0, room)]
 
 
 def _turn_slots(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
@@ -333,27 +373,28 @@ def focus_questions(state: dict[str, Any], fired: list[str]) -> dict[str, Questi
             "No existing entry states it; recording it would add something new.",
         )
         questions[f"home_{signal}"] = Choice(
-            instructions=f"Where should {subject} be recorded so later turns benefit? "
-            "Pick the smallest component that fits.",
+            instructions=f"Where should {subject} be recorded so "
+            f"{HORIZONS[state['scope']]} benefit? Pick the smallest component that fits.",
             criteria=HOME_KINDS,
         )
-    for k, _ in _local_entries(state):
-        if lessons:
-            questions[f"covers_{k}"] = _noul(
-                f"Is `harness_entries[{k}]` about the same topic as a lesson listed in "
-                "`gate.fired`, as it appears in `turns`?",
-                "The entry addresses the same fact, rule, procedure or role, so the "
-                "lesson belongs in it.",
-                "The entry is about something else.",
-            )
-        if CONTRADICTED in fired:
-            questions[f"wrong_{k}"] = _noul(
-                f"Do the messages in `turns` contradict `harness_entries[{k}]` or show "
-                "that it is outdated?",
-                "The conversation shows this entry's fact, rule or procedure no longer "
-                "holds.",
-                "The conversation is consistent with this entry or unrelated to it.",
-            )
+    editable = _editable(state)
+    for k, _ in editable if lessons else []:
+        questions[f"covers_{k}"] = _noul(
+            f"Is `harness_entries[{k}]` about the same topic as a lesson listed in "
+            "`gate.fired`, as it appears in `turns`?",
+            "The entry addresses the same fact, rule, procedure or role, so the "
+            "lesson belongs in it.",
+            "The entry is about something else.",
+        )
+    contradicted = [*editable, *_overridable(state)] if CONTRADICTED in fired else []
+    for k, _ in contradicted:
+        questions[f"wrong_{k}"] = _noul(
+            f"Do the messages in `turns` contradict `harness_entries[{k}]` or show "
+            "that it is outdated?",
+            "The conversation shows this entry's fact, rule or procedure no longer "
+            "holds.",
+            "The conversation is consistent with this entry or unrelated to it.",
+        )
     if lessons:
         for j, _ in _turn_slots(state):
             questions[f"turn_{j}"] = _noul(
@@ -380,8 +421,9 @@ def decide_focus(
 
     A lesson recorded already is dropped; with no lesson left and no contradicted
     entry the judge declines. Instructions name each lesson's home kind (one kind when
-    the choice is confident, else the top two), the local entries that cover a lesson
-    or are contradicted, and quotes of the strongest evidence turns.
+    the choice is confident, else the top two), the entries of the target store that
+    cover a lesson or are contradicted, the read-only entries a local pass should
+    override, and quotes of the strongest evidence turns.
     """
     entries = evidence["harness_entries"]
     lessons = [s for s in fired if s in LESSONS]
@@ -389,16 +431,18 @@ def decide_focus(
         s for s in lessons if nouls.get(f"captured_{s}", 0.0) < config.veto_threshold
     ]
     captured = [s for s in lessons if s not in kept]
-    covers = [
-        entries[k]["ref"]
-        for k, _ in _local_entries(evidence)
-        if nouls.get(f"covers_{k}", 0.0) >= config.threshold
-    ]
-    wrong = [
-        entries[k]["ref"]
-        for k, _ in _local_entries(evidence)
-        if nouls.get(f"wrong_{k}", 0.0) >= config.threshold
-    ]
+    scope = evidence["scope"]
+
+    def flagged(prefix: str, slots: list[tuple[int, dict]]) -> list[str]:
+        return [
+            entries[k]["ref"]
+            for k, _ in slots
+            if nouls.get(f"{prefix}_{k}", 0.0) >= config.threshold
+        ]
+
+    covers = flagged("covers", _editable(evidence))
+    wrong = flagged("wrong", _editable(evidence))
+    overrides = flagged("wrong", _overridable(evidence))
     ranked = sorted(
         (
             (p, j)
@@ -412,9 +456,9 @@ def decide_focus(
     rationale_parts = [f"fired: {', '.join(fired)}"]
     if captured:
         rationale_parts.append(f"already recorded: {', '.join(captured)}")
-    if wrong:
-        rationale_parts.append(f"contradicted: {', '.join(wrong)}")
-    decision = bool(kept or wrong)
+    if wrong or overrides:
+        rationale_parts.append(f"contradicted: {', '.join([*wrong, *overrides])}")
+    decision = bool(kept or wrong or overrides)
     if not decision:
         return False, "; ".join(rationale_parts), None, []
 
@@ -428,7 +472,7 @@ def decide_focus(
         else:
             top = sorted(answer["probabilities"], key=answer["probabilities"].get)
             home = f"a {top[-1]} or a {top[-2]}"
-        lines.append(f"- Lesson: {LESSONS[signal]}. Record it as {home}.")
+        lines.append(f"- Lesson: {lesson(signal, scope)}. Record it as {home}.")
     if covers and kept:
         lines.append(
             f"- Existing entries on the same topic: {', '.join(covers)}. Update them "
@@ -437,6 +481,11 @@ def decide_focus(
     for ref in wrong:
         lines.append(
             f"- Entry {ref} is contradicted by the conversation: update or delete it."
+        )
+    for ref in overrides:
+        lines.append(
+            f"- Entry {ref} is contradicted by the conversation but read-only here: "
+            "create a local entry that overrides it."
         )
     if turns:
         quoted = "; ".join(f'"{_quote(t)}"' for t in turns)

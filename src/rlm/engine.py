@@ -1784,10 +1784,11 @@ class RLMEngine:
             )
 
     def _judge_evidence(
-        self, trigger: str, blocks: list[Block] | None, start: int
+        self, trigger: str, blocks: list[Block] | None, start: int, store
     ) -> dict[str, Any]:
         """The judge's state: context messages logged since ``start``, a stable
-        message index that survives window rebuilds."""
+        message index that survives window rebuilds, seen from ``store``, the store
+        the pass writes."""
         messages = [
             (index, message)
             for index, message in zip(
@@ -1800,7 +1801,8 @@ class RLMEngine:
             trigger=trigger,
             messages=messages,
             view=self._harness,
-            history=load_history(self._harness.local),
+            history=load_history(store),
+            scope=store.scope,
             blocks=blocks,
         )
 
@@ -1858,7 +1860,7 @@ class RLMEngine:
             if judge_runs and self._refine_judge is None:
                 raise ValueError("a TypeSafe review requires harness.refine_judge")
             state = (
-                self._judge_evidence(trigger, evidence, self._review_mark)
+                self._judge_evidence(trigger, evidence, self._review_mark, store)
                 if judge_runs
                 else None
             )

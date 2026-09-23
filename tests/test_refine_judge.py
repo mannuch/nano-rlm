@@ -119,7 +119,44 @@ def test_focus_questions_follow_what_fired(tmp_path):
     assert lesson["home_user_correction"].type == "choice"
 
     stale = focus_questions(focus_state(evidence, [CONTRADICTED]), [CONTRADICTED])
-    assert set(stale) == {"wrong_0"}
+    assert set(stale) == {"wrong_0", "wrong_1"}
+
+
+def test_a_global_pass_targets_global_entries_and_future_sessions(tmp_path):
+    messages = [{"role": "user", "content": "no"}]
+    entries = [("local", "Tests", "uv run"), ("global", "Style", "short")]
+    evidence = _evidence(tmp_path, messages, entries=entries, scope="global")
+
+    assert evidence["scope"] == "global"
+    assert [e["ref"] for e in evidence["harness_entries"]] == [
+        "global:style",
+        "local:tests",
+    ]
+    fact = gate_questions(evidence)["durable_fact"]
+    assert "tasks in future sessions" in fact.instructions
+    fired = ["durable_fact", CONTRADICTED]
+    questions = focus_questions(focus_state(evidence, fired), fired)
+    assert {k for k in questions if k.startswith(("covers_", "wrong_"))} == {
+        "covers_0",
+        "wrong_0",
+    }
+    assert "tasks in future sessions" in questions["home_durable_fact"].instructions
+
+
+def test_a_local_pass_overrides_a_contradicted_read_only_entry(tmp_path):
+    evidence = _evidence(
+        tmp_path,
+        [{"role": "user", "content": "we stopped writing short answers"}],
+        entries=[("global", "Style", "short answers")],
+    )
+    decision, rationale, instructions, _ = decide_focus(
+        [CONTRADICTED], {"wrong_0": 0.9}, {}, evidence, CONFIG
+    )
+    assert decision and "contradicted: global:style" in rationale
+    assert "Entry global:style is contradicted by the conversation but read-only" in (
+        instructions
+    )
+    assert "create a local entry that overrides it" in instructions
 
 
 def test_decide_focus_vetoes_names_homes_and_quotes_evidence(tmp_path):

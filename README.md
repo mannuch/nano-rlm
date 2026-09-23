@@ -587,7 +587,8 @@ answers typed yes/no and choice questions with calibrated probabilities; the tas
 still writes the plan and may still decline it. The judge is opt-in, root agent only, and
 sends a compact evidence state to the TypeSafe API: the messages since the last pass
 (clipped, newest first, user turns kept ahead of the rest), exception counts, the
-compaction blocks behind the pass and the visible harness entries.
+compaction blocks behind the pass, and the visible harness entries with the entries of
+the store the pass writes first, alongside that store's refinement history.
 
 ```json
 "refine_judge": {
@@ -607,10 +608,14 @@ A review is two calls. The **gate** asks one yes/no question per kind of evidenc
 whether anything contradicts an existing entry); none at `threshold` declines after that
 one call. The **focus** call is asked only about the lessons that fired, stated as
 premises: per lesson, whether it is already recorded (a veto at `veto_threshold`) and
-which kind should hold it; per local entry, whether it covers a lesson or is contradicted;
-per turn, whether it is direct evidence. Code turns the answers into deterministic plan
+which kind should hold it; per entry of the store the pass writes, whether it covers a
+lesson or is contradicted; in a local pass, per read-only global or ancestor entry,
+whether it is contradicted; per turn, whether it is direct evidence. Questions are worded
+for the pass's scope: a local pass serves later tasks in this session, a global pass
+(host `global: true`) future sessions. Code turns the answers into deterministic plan
 instructions naming the home kind (one kind when the choice's confidence reaches
-`home_confidence`), the entries to update or delete, and quotes of the strongest turns.
+`home_confidence`), the entries to update or delete, the read-only entries a local entry
+should override, and quotes of the strongest turns.
 They reach the planner as `<refine_instructions>`, the same slot host and kernel
 instructions use.
 
