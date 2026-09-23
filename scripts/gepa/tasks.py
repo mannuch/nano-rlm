@@ -28,6 +28,7 @@ QuestionKind = Literal[
     "subclasses",
     "longest_function",
     "followup",
+    "bugfix",
     "api",
 ]
 
@@ -49,6 +50,8 @@ class Question:
 
     @property
     def prompt(self) -> str:
+        if self.kind == "bugfix":
+            return self.text
         return f"{self.text}\n\n{ANSWER_FORMAT}"
 
 
@@ -63,6 +66,9 @@ class Task:
     repo: str
     cwd: str
     questions: list[Question]
+    setup: dict[str, Any] | None = None
+    """For bug-fix sessions (``bugs.py``): the mutations applied to a private copy of
+    ``cwd`` and the Python that runs its tests."""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,6 +80,7 @@ class Task:
             repo=data["repo"],
             cwd=data["cwd"],
             questions=[Question(**q) for q in data["questions"]],
+            setup=data.get("setup"),
         )
 
 

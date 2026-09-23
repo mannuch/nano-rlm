@@ -41,6 +41,36 @@ A quick look at what was generated:
 uv run python -c "import json; [print(t['id'], [q['kind'] for q in t['questions']]) for t in map(json.loads, open('scripts/gepa/tasks/tasks.jsonl'))]"
 ```
 
+### Bug-fix sessions instead
+
+`bugs.py` builds sessions that fix injected bugs, checked by each repository's own tests:
+three bugs in different source files, introduced one at a time just before the prompt
+that reports their failing tests, then a follow-up about an earlier fix and the history
+question. Mutants that fail 1-25 tests in at most three test files, with no collection
+errors, are kept. Each repository's tests run in a virtualenv under
+`scripts/gepa/workspace/.venvs/` (built from its `requirements/tests.txt` on first use),
+never the one sessions run in. Use repositories whose package is not installed in this
+project's environment, or sessions could read the unmodified source from
+`site-packages` (fixes that do are scored zero).
+
+```bash
+uv run python scripts/gepa/bugs.py \
+  --repo itsdangerous=<path> --repo click=<path> --per-repo 10   # about a minute
+```
+
+Before optimizing against a new task set, measure the current prompts on it. A set the
+seed nearly aces cannot separate candidates (aim for a 60-80% fix rate):
+
+```bash
+uv run python scripts/gepa/baseline.py --tasks scripts/gepa/tasks/bugs.jsonl \
+  --run-dir scripts/gepa/runs/pilot --model deepseek/deepseek-v4.1-flash --summarize-at 16000
+```
+
+It prints the score per question kind, tokens, turns and compactions per rollout, and
+the test outcome of every unsolved fix, and writes them to `summary.txt`. For an
+optimization run on bug-fix sessions, pass the same `--summarize-at` and a weaker token
+penalty (`--penalty-tokens 500000`), since these sessions are legitimately long.
+
 ## 4. Credentials
 
 ```bash
@@ -58,7 +88,7 @@ default to 256.
 ulimit -n 4096
 nohup uv run --group gepa python scripts/gepa/optimize.py \
   --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
-  --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
+  --model deepseek/deepseek-v4.1-flash --reflection-model openai/gpt-6-astra \
   --max-metric-calls 300 --minibatch 3 --concurrency 8 \
   > scripts/gepa/runs/first.log 2>&1 < /dev/null &
 disown
@@ -123,4 +153,5 @@ diffs; never copy a candidate blindly.
 ## 9. Cleanup
 
 `scripts/gepa/workspace/`, `scripts/gepa/tasks/` and `scripts/gepa/runs/` are gitignored. The sessions
-directory reaches a few GB after 500 rollouts; delete it when the run is reviewed.
+directory reaches a few GB after 500 rollouts; delete it when the run is reviewed. A
+bug-fix rollout's private copy of the repository is deleted when the rollout ends.

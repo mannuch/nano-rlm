@@ -11,6 +11,7 @@ import ast
 import asyncio
 import json
 import re
+import shutil
 import traceback
 import uuid
 import warnings
@@ -29,6 +30,7 @@ from rlm.engine import RLMEngine
 from rlm.history import History
 from rlm.session import Session
 
+from bugs import check_fix, introduce_bug, prepare_workdir, snapshot
 from tasks import Question, Task, extract_answer, numbered_prompt, score_answer
 
 TOKENS_PER_PENALTY_POINT = 100_000
@@ -53,6 +55,7 @@ class RolloutSettings:
     max_total_tokens: int = 600_000
     exec_timeout: int = 60
     timeout_s: float = 900.0
+    tokens_per_penalty_point: int = TOKENS_PER_PENALTY_POINT
 
 
 @dataclass
@@ -91,7 +94,10 @@ class QuestionResult:
     after_compaction: bool = False
     turns: int = 0
     skipped: bool = False
-    """Not asked (history_expand before any compaction); excluded from correctness."""
+    """Not asked (history_expand before any compaction, or a bug whose line an earlier
+    edit rewrote); excluded from correctness."""
+    patch: str = ""
+    """For a bugfix: the source changes made while answering it."""
 
 
 @dataclass
@@ -156,11 +162,18 @@ async def run_rollout(
     answers: dict[int, tuple[str | None, int]] = {}
     """Question position -> (reply, turns before it), for the questions asked."""
     skipped: set[int] = set()
+    fixes: dict[int, dict[str, Any]] = {}
+    workdir: Path | None = None
     engine: RLMEngine | None = None
     try:
         session = Session(session_dir=session_dir)
+        cwd = task.cwd
+        unresolved: set[str] = set()
+        if task.setup is not None:
+            workdir = prepare_workdir(task, session_dir)
+            cwd = str(workdir)
         engine = RLMEngine(
-            cwd=task.cwd, session=session, runtime_config=_config(candidate, settings)
+            cwd=cwd, session=session, runtime_config=_config(candidate, settings)
         )
         for position, question in enumerate(task.questions):
             if (
@@ -171,12 +184,32 @@ async def run_rollout(
                 # API would be a pointless call.
                 skipped.add(position)
                 continue
+            if question.kind == "bugfix":
+                try:
+                    introduce_bug(question, workdir)
+                except ValueError:
+                    # An earlier edit rewrote the line this bug targets.
+                    skipped.add(position)
+                    continue
+                files = snapshot(workdir)
             turns_before = engine._turn
             result = await asyncio.wait_for(
                 engine.prompt(numbered_prompt(position, question)),
                 timeout=settings.timeout_s,
             )
             answers[position] = (result.answer, turns_before)
+            if question.kind == "bugfix":
+                fix = await asyncio.to_thread(
+                    check_fix,
+                    question,
+                    workdir,
+                    task.setup["python"],
+                    files,
+                    unresolved,
+                )
+                fix.pop("snapshot")
+                unresolved |= fix.pop("failing")
+                fixes[position] = fix
             if engine.stop_reason not in (None, "done"):
                 break
         rollout.prompt_tokens = engine._total_usage.prompt_tokens
@@ -192,10 +225,14 @@ async def run_rollout(
                 await asyncio.wait_for(engine.aclose(), timeout=120)
             except BaseException as error:  # noqa: BLE001
                 rollout.error = (rollout.error or "") + f"\nclose failed: {error!r}"
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
     if (session_dir / "messages.jsonl").exists():
         try:
             _digest(rollout, session_dir)
-            rollout.results = _score(task, answers, skipped, rollout, session_dir)
+            rollout.results = _score(
+                task, answers, skipped, fixes, rollout, session_dir
+            )
         except Exception as error:  # noqa: BLE001 - keep the answers' scores on a digest bug
             rollout.error = (rollout.error or "") + f"\ndigest failed: {error!r}"
             rollout.results = [
@@ -220,7 +257,7 @@ async def run_rollout(
     penalty = (
         0.05
         * (rollout.prompt_tokens + rollout.completion_tokens)
-        / TOKENS_PER_PENALTY_POINT
+        / settings.tokens_per_penalty_point
     )
     rollout.score = round(max(0.0, rollout.correctness - penalty), 4)
     rollout.final_answers = [answer or "" for answer, _ in answers.values()]
@@ -343,6 +380,7 @@ def _score(
     task: Task,
     answers: dict[int, tuple[str | None, int]],
     skipped: set[int],
+    fixes: dict[int, dict[str, Any]],
     rollout: Rollout,
     session_dir: Path,
 ) -> list[QuestionResult]:
@@ -368,7 +406,11 @@ def _score(
                     expected=None,
                     answer=None,
                     score=0.0,
-                    check_note="not asked: no compaction had happened yet",
+                    check_note=(
+                        "not asked: an earlier edit rewrote the line this bug targets"
+                        if question.kind == "bugfix"
+                        else "not asked: no compaction had happened yet"
+                    ),
                     skipped=True,
                 )
             )
@@ -391,6 +433,17 @@ def _score(
         )
         if answered is None:
             result.check_note = "session ended before this question"
+            results.append(result)
+            continue
+        if question.kind == "bugfix":
+            next_asked = (
+                user_indices[order + 1]
+                if order + 1 < len(user_indices)
+                else len(hist.messages)
+            )
+            _score_fix(result, fixes.get(position), rollout, asked_at, next_asked)
+            reply = (answer_text or "").strip()
+            result.answer = reply.splitlines()[0][:300] if reply else None
             results.append(result)
             continue
         if question.check is not None:
@@ -418,6 +471,32 @@ def _score(
             result.score = score_answer(question, answer_text)
         results.append(result)
     return results
+
+
+def _score_fix(
+    result: QuestionResult,
+    fix: dict[str, Any] | None,
+    rollout: Rollout,
+    asked_at: int,
+    next_asked: int,
+) -> None:
+    if fix is None:
+        result.check_note = "the fix was not checked"
+        return
+    result.expected = "every test in the file passes"
+    result.score, result.check_note, result.patch = (
+        fix["score"],
+        fix["note"],
+        fix["patch"],
+    )
+    if any(
+        "site-packages" in c.code
+        for c in rollout.cells
+        if asked_at < c.index < next_asked
+    ):
+        # An installed copy of the package would reveal the unmutated source.
+        result.score = 0.0
+        result.check_note += "; read an installed copy under site-packages"
 
 
 def _expected_for_api(

@@ -2,7 +2,7 @@
 
     uv run --group gepa python scripts/gepa/optimize.py --tasks tasks.jsonl \\
         --run-dir scripts/gepa/runs/first --model deepseek/deepseek-v4.1-flash \\
-        --reflection-model anthropic/claude-fable-5.1 --max-metric-calls 300
+        --reflection-model openai/gpt-6-astra --max-metric-calls 300
 
 Re-running with the same ``--run-dir`` resumes from ``gepa_state.bin``. The result is a
 ``prompt_overrides`` object (``best_prompt_overrides.json``) plus ``report.md``; landing
@@ -152,6 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--timeout", type=float, default=900.0, help="Seconds per question prompt"
     )
+    parser.add_argument(
+        "--penalty-tokens",
+        type=int,
+        default=100_000,
+        help="Session tokens that cost 0.05 of score (raise it for bug-fix sessions)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
 
@@ -188,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         max_depth=args.max_depth,
         delegation_prompt=args.delegation_prompt,
         timeout_s=args.timeout,
+        tokens_per_penalty_point=args.penalty_tokens,
     )
     adapter = NanoRlmAdapter(
         settings, session_root, seed=seed, concurrency=args.concurrency

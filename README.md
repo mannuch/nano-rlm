@@ -754,7 +754,10 @@ using a documented runtime surface (`rlm.shell.run`, `rlm.agent.spawn`,
 as the answer. The history question that quotes question 1 is only asked once the
 session has compacted. A session's score is the mean question score minus a small token
 penalty. Rollouts run with a lower `summarize_at_tokens` than production so sessions
-compact, and roll up, often enough to exercise the compaction texts.
+compact, and roll up, often enough to exercise the compaction texts. `bugs.py` builds a
+second kind of task: sessions that fix injected bugs in a pinned repository, scored by
+its own tests, and `baseline.py` measures the current prompts on any task set before an
+optimization run is spent on it.
 
 ```bash
 uv run python scripts/gepa/workspace.py                     # pinned checkouts, one NAME=PATH per line

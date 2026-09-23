@@ -164,6 +164,8 @@ class NanoRlmAdapter:
             line = f"Q{i + 1} [{r.kind}] score {r.score:.2f}: expected {r.expected!r}, got {r.answer!r}"
             if r.check is not None:
                 line += f"; runtime check ({r.check}) {'passed' if r.check_ok else 'FAILED'}: {r.check_note}"
+            if r.kind == "bugfix":
+                line += f"; {r.check_note}; patch:\n{_clip(r.patch, 500) or '(no source change)'}"
             feedback.append(line)
         if rollout.duplicate_cells:
             feedback.append(

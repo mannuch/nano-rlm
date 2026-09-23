@@ -13,6 +13,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "gepa"))
 
+from bugs import (  # noqa: E402
+    Mutation,
+    apply_mutation,
+    check_fix,
+    find_mutants,
+    mutation_sites,
+    snapshot,
+)
 from components import validate_candidate  # noqa: E402
 from rollout import CHECKS, Cell, Rollout, _quoted_words  # noqa: E402
 from tasks import (  # noqa: E402
@@ -294,3 +302,55 @@ def test_candidate_guard_names_dropped_tokens():
         == "the rewritten text is empty"
     )
     assert "unknown component" in validate_candidate({"bogus": "x"}, seed)["bogus"]
+
+
+def test_bug_mutants_are_verified_by_the_tests_and_fixes_scored(tmp_path: Path):
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text(
+        "def add_one(x):\n    return x + 1\n\n\ndef name():\n    return 'pkg'\n"
+    )
+    (tmp_path / "tests" / "test_pkg.py").write_text(
+        "from pkg import add_one, name\n\n\n"
+        "def test_add_one():\n    assert add_one(1) == 2\n\n\n"
+        "def test_name():\n    assert name() == 'pkg'\n"
+    )
+    assert {(m.operator, m.mutated) for m in mutation_sites(tmp_path)} == {
+        ("arithmetic", "x - 1"),
+        ("off_by_one", "2"),
+    }
+    python = Path(sys.executable)
+    mutants = find_mutants(tmp_path, python, random.Random(0), want=5, attempts=10)
+    assert len(mutants) == 2
+    assert all(m.test_files == ["tests/test_pkg.py"] for m in mutants)
+    assert all(m.targets == ["tests.test_pkg::test_add_one"] for m in mutants)
+
+    mutation = mutants[0].mutation
+    question = Question(
+        "bugfix",
+        "",
+        None,
+        params={"test_files": mutants[0].test_files, "targets": mutants[0].targets},
+    )
+    apply_mutation(tmp_path, mutation)
+    before = snapshot(tmp_path)
+    broken = check_fix(question, tmp_path, python, before, set())
+    assert broken["score"] == 0.0 and broken["patch"] == ""
+    reverted = Mutation(
+        mutation.path,
+        mutation.line,
+        mutation.start,
+        mutation.start + len(mutation.mutated.encode()),
+        mutation.mutated,
+        mutation.original,
+        mutation.operator,
+    )
+    apply_mutation(tmp_path, reverted)
+    fixed = check_fix(question, tmp_path, python, before, set())
+    assert fixed["score"] == 1.0 and fixed["failing"] == set()
+    assert "+    return x + 1" in fixed["patch"]
+    test_file = tmp_path / "tests" / "test_pkg.py"
+    test_file.write_text(test_file.read_text() + "# edited\n")
+    assert check_fix(question, tmp_path, python, before, set())["note"] == (
+        "a test file was edited"
+    )
