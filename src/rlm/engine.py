@@ -253,7 +253,9 @@ class RLMEngine:
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
-        self.cwd = cwd or os.getcwd()
+        # The kernel starts in cwd and then chdirs to it, so a relative path would
+        # resolve twice.
+        self.cwd = str(Path(cwd).resolve()) if cwd else os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
         self.max_total_turns = config.policy.max_total_turns
         self.max_tool_output_bytes = config.policy.max_tool_output_bytes

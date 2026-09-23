@@ -168,7 +168,10 @@ async def test_run_case_seeds_the_global_store_and_runs_a_global_pass(
     monkeypatch.setattr("rlm.engine.make_client", lambda provider: client)
     settings = Settings(model="dummy", api_key="k", base_url=None, typesafe_api_key="t")
 
-    row = await run_case(BY_ID["global_stale_entry"], "force", 0, settings, tmp_path)
+    monkeypatch.chdir(tmp_path)  # a relative run dir, as the runbook passes one
+    row = await run_case(
+        BY_ID["global_stale_entry"], "force", 0, settings, Path("runs/smoke")
+    )
 
     assert row["error"] is None
     assert row["scope"] == "global" and row["decision"] is True
