@@ -118,7 +118,7 @@ wc -l scripts/refine_eval/runs/first/results.jsonl    # cases finished
 it from a partial or edited `results.jsonl`:
 
 ```bash
-uv run python scripts/refine_eval/run.py --model x --run-dir scripts/refine_eval/runs/first --report-only
+uv run python scripts/refine_eval/run.py --run-dir scripts/refine_eval/runs/first --report-only
 ```
 
 Errored cases and failed passes are counted in the header and left out of every table.

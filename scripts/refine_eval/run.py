@@ -185,7 +185,7 @@ async def run_all(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", help="Task model; required unless --report-only")
     parser.add_argument("--base-url", default=os.environ.get("RLM_BASE_URL"))
     parser.add_argument("--run-dir", required=True)
     parser.add_argument(
@@ -218,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         print(root / "report.md")
         return 0
 
+    if not args.model:
+        parser.error("--model is required unless --report-only")
     api_key = os.environ.get("RLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     typesafe_key = os.environ.get("TYPESAFE_API_KEY")
     if not api_key:
