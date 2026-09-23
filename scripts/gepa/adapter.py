@@ -158,6 +158,9 @@ class NanoRlmAdapter:
             f"{len(rollout.compactions)} compactions, {len(rollout.spawns)} child agents spawned."
         ]
         for i, r in enumerate(rollout.results):
+            if r.skipped:
+                feedback.append(f"Q{i + 1} [{r.kind}] {r.check_note}")
+                continue
             line = f"Q{i + 1} [{r.kind}] score {r.score:.2f}: expected {r.expected!r}, got {r.answer!r}"
             if r.check is not None:
                 line += f"; runtime check ({r.check}) {'passed' if r.check_ok else 'FAILED'}: {r.check_note}"
@@ -190,8 +193,14 @@ class NanoRlmAdapter:
         if component == "rollup" and not rollout.rolled_up:
             return None
         post = [r for r in rollout.results if r.after_compaction]
+        missed = [
+            f"Q{i + 1} [{r.kind}] expected {r.expected!r}, got {r.answer!r}"
+            for i, r in enumerate(rollout.results)
+            if r.after_compaction and r.score < 1
+        ]
         post_line = (
             f"{sum(r.score for r in post):.1f}/{len(post)} questions answered correctly after compaction"
+            + (f" (missed: {'; '.join(missed)})" if missed else "")
             if post
             else "no questions were asked after the compaction"
         )

@@ -24,7 +24,10 @@ uv run python scripts/gepa/workspace.py
 
 Paste the `NAME=PATH` lines from step 2 as `--repo` arguments. 15 per repository gives
 60 tasks, written to `scripts/gepa/tasks/tasks.jsonl` (gitignored; `--out` chooses
-another file); `optimize.py` holds out 33% by task id, so 20 validation / 40 training.
+another file); `optimize.py` holds out 33% by task id, so about 20 validation / 40
+training. Each session is 9-10 questions: six about the repository, two follow-ups that
+refer back to earlier questions by number, one runtime-API question, and the history
+question (asked only after the session has compacted).
 
 ```bash
 uv run python scripts/gepa/tasks.py \
@@ -54,7 +57,7 @@ default to 256.
 ```bash
 ulimit -n 4096
 nohup uv run --group gepa python scripts/gepa/optimize.py \
-  --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
+  --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
   --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
   --max-metric-calls 300 --minibatch 3 --concurrency 8 \
   > scripts/gepa/runs/first.log 2>&1 < /dev/null &
@@ -64,18 +67,21 @@ disown
 `nohup` ignores SIGHUP only; detaching stdin and `disown` keep a stray Ctrl-C or a
 closing terminal from reaching the process.
 
-Defaults this accepts: `--summarize-at 10000`, `--tail 1000`, `--max-depth 1`,
+Defaults this accepts: `--summarize-at 9000` (far below production, so sessions compact
+two or three times and seal rollups; the system prompt alone is ~6.6k tokens, so small
+changes here move the compaction rate a lot), `--tail 1000`, `--max-depth 1`,
 `--delegation-prompt` (sessions run with `policy.delegation_prompt`; that text stays
 fixed), `--timeout 900` per question, and the first-run components (`task`, `repl_doctrine`,
 `delegation_doctrine`, `checkpoint`, `rollup`, `staircase_framing`; `--components`
 selects others, including the reference texts).
 
-Wall time: plan on 10-15 hours for the ~500 rollouts a 300-call budget produces at
-concurrency 8. Each rollout is its own IPython kernel subprocess (plus a child session
-when the model delegates), so 8 is comfortable on a laptop; provider rate limits are the
-more likely ceiling. If `run_log_stderr.txt` shows 429 retries, drop to 6.
+Wall time: each metric call is one rollout, so a 300-call budget is 300 rollouts; at
+concurrency 8 plan on 4-5 hours (six-question sessions took 2h20m). Each rollout is its
+own IPython kernel subprocess (plus a child session when the model delegates), so 8 is
+comfortable on a laptop; provider rate limits are the more likely ceiling. If
+`run_log_stderr.txt` shows 429 retries, drop to 6.
 
-Cost: on the order of $15-35 per 300-call run with the models above (the task model's
+Cost: on the order of $12-20 per 300-call run with the models above (the task model's
 input tokens dominate; the reflection model is a few dollars). For a cheaper feel-out,
 `--max-metric-calls 60` gives the seed evaluation plus 5-8 iterations for a few dollars.
 
@@ -104,6 +110,8 @@ In `scripts/gepa/runs/first/`:
   the reflection model's token totals.
 - `best_prompt_overrides.json`: the `prompt_overrides` object (only the components that
   changed), which any ACP host can send in the runtime contract.
+- `reflection_log.jsonl`: every reflection call's prompt, raw response and
+  `finish_reason`, for diagnosing a proposal that came back empty or malformed.
 - `sessions/<task>/<id>/messages.jsonl`: every rollout's ledger, for reading what a
   candidate actually did.
 

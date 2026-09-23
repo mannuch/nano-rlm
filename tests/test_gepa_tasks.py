@@ -21,9 +21,12 @@ from tasks import (  # noqa: E402
     _q_callers,
     _q_count_defs,
     _q_decorator_users,
+    _q_followup,
     _q_importers,
     _q_line_count,
+    _q_longest_function,
     _q_param_default,
+    _q_subclasses,
     _q_test_containing,
     make_tasks,
     read_tasks,
@@ -55,7 +58,8 @@ def repo(tmp_path: Path) -> Path:
                     return "t"
 
             def use_a():
-                return helper(2)
+                value = helper(2)
+                return value
             """
         ).lstrip()
     )
@@ -69,6 +73,9 @@ def repo(tmp_path: Path) -> Path:
                 return helper(3)
             """
         ).lstrip()
+    )
+    (tmp_path / "pkg" / "c.py").write_text(
+        "class Sub(Thing):\n    pass\n\n\nclass Other(a.Thing):\n    pass\n"
     )
     (tmp_path / "tests" / "test_a.py").write_text(
         "def test_helper():\n    assert True\n"
@@ -108,6 +115,19 @@ def test_generators_compute_answers_from_the_ast(repo: Path):
     lines = _q_line_count([m for m in modules if m.path == "pkg/a.py"] * 1, rng)
     assert lines is None  # below the 40-line floor
 
+    assert _q_subclasses(modules, rng).answer == ["pkg/c.py::Other", "pkg/c.py::Sub"]
+    assert _q_longest_function(modules, rng).answer == "pkg/a.py::use_a"
+
+    earlier = [
+        Question("test_containing", "", "tests/test_a.py", path="tests/test_a.py"),
+        Question("importers", "", ["pkg/a.py", "pkg/b.py"]),
+    ]
+    followups = {
+        (q.text.split("Question ")[1][0], q.answer)
+        for q in (_q_followup(earlier, modules, random.Random(i)) for i in range(20))
+    }
+    assert followups == {("1", 2), ("1", 1), ("2", "pkg/a.py")}
+
 
 def test_make_tasks_orders_api_questions_last_and_round_trips(
     repo: Path, tmp_path: Path
@@ -121,6 +141,9 @@ def test_make_tasks_orders_api_questions_last_and_round_trips(
         assert kinds[:2] != ["api", "api"] and kinds[-2:] == ["api", "api"]
         assert task.questions[-1].check == "history_expand"
         assert all("ANSWER:" in q.prompt for q in task.questions)
+        for position, question in enumerate(task.questions):
+            if question.kind == "followup":
+                assert int(question.text.split("Question ")[1][0]) <= position
     path = tmp_path / "tasks.jsonl"
     write_tasks(path, tasks)
     assert [t.to_json() for t in read_tasks(path)] == [t.to_json() for t in tasks]
@@ -246,6 +269,9 @@ def test_candidate_guard_names_dropped_tokens():
     problems = validate_candidate({**seed, "task": "x" * 1_300}, seed)
     assert "more than the 1200 allowed" in problems["task"]
     assert validate_candidate({**seed, "task": "x" * 1_000}, seed) == {}
+    leaked = validate_candidate({**seed, "task": "Keep the score high."}, seed)
+    assert "optimization sessions (scoring)" in leaked["task"]
+    assert validate_candidate({**seed, "task": "Use an underscore."}, seed) == {}
     assert (
         validate_candidate({**seed, "task": "  "}, seed)["task"]
         == "the rewritten text is empty"

@@ -1,11 +1,14 @@
 """Which prompt texts the optimizer may rewrite, and what each rewrite must keep.
 
-A rewrite that drops a required token is rejected before any rollout is spent, with
-feedback naming the token, so the reflection LM learns to keep the API facts the runtime
-guide exists to convey.
+A rewrite that drops a required token, or that mentions what exists only in the
+optimization sessions (scoring, checks, the answer format), is rejected before any rollout
+is spent, with feedback naming the problem, so the reflection LM learns to keep the API
+facts the runtime guide exists to convey and to state practices that generalize.
 """
 
 from __future__ import annotations
+
+import re
 
 from rlm.prompt import DEFAULT_PROMPTS, REQUIRED_PROMPT_MARKERS
 
@@ -77,6 +80,16 @@ REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "rollup": ("Do not call tools",),
     "staircase_framing": ("oldest first",),
 }
+
+LEAK_PATTERNS: dict[str, str] = {
+    r"ANSWER:": "the benchmark's answer-line format",
+    r"\bscor(?:e|es|ed|ing)\b": "scoring",
+    r"\bgrad(?:er|ers|ed|ing)\b": "grading",
+    r"\bthe check\b|\bchecker\b": "the runtime checks",
+    r"\bQuestion \d": "question numbering",
+}
+"""What only the optimization sessions have: a rewrite that mentions them has learned
+the benchmark instead of a working practice, and would ship that to real users."""
 
 MAX_GROWTH = 2.0
 MIN_ALLOWED_CHARS = 1_200
@@ -154,13 +167,18 @@ def reflection_template(name: str, seed: dict[str, str]) -> str:
         "Below are sessions the agent ran with this text: the questions it was asked, the "
         "cells it ran and answers it gave, and feedback with the scores and runtime checks.\n\n"
         "```\n<side_info>\n```\n\n"
-        f"Write an improved `{name}` text that makes sessions like these score higher. "
+        f"Write an improved `{name}` text that makes sessions like these go better. "
         f"It must be at most {int(max_chars(name, seed) * STATED_LIMIT_FRACTION)} characters "
         f"(the current text is {len(seed.get(name, ''))}); longer texts are rejected "
         f"without being tried. {keep}"
-        "Do not describe the specific repositories or questions above; write guidance that "
-        "generalizes. Do not add API details that the surrounding prompt already documents. "
-        "Provide only the new text, inside a single ``` block."
+        "The text ships to real users whose tasks look nothing like these sessions, and "
+        "the sessions' scoring, runtime checks, answer-line format and question numbering "
+        "exist only here. So never mention scores, grading, checks, `ANSWER:` lines, "
+        "numbered questions, or an output shape for answers; name the general working "
+        "practice that would have produced the better behavior. Rewrites that mention "
+        "them are rejected without being tried. Do not describe the specific repositories "
+        "or questions above. Do not add API details that the surrounding prompt already "
+        "documents. Provide only the new text, inside a single ``` block."
     )
 
 
@@ -188,5 +206,17 @@ def validate_candidate(
                 "the rewrite dropped text the runtime depends on: "
                 + ", ".join(f"`{token}`" for token in missing)
                 + "; keep these exact spellings"
+            )
+            continue
+        leaked = [
+            what
+            for pattern, what in LEAK_PATTERNS.items()
+            if re.search(pattern, text) and not re.search(pattern, seed.get(name, ""))
+        ]
+        if leaked:
+            problems[name] = (
+                "the rewrite refers to the optimization sessions ("
+                + ", ".join(leaked)
+                + "); state a working practice that holds for any task instead"
             )
     return problems

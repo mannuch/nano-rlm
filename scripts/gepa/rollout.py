@@ -27,7 +27,7 @@ from rlm.engine import RLMEngine
 from rlm.history import History
 from rlm.session import Session
 
-from tasks import Question, Task, extract_answer, score_answer
+from tasks import Question, Task, extract_answer, numbered_prompt, score_answer
 
 TOKENS_PER_PENALTY_POINT = 100_000
 """Score loses 0.05 per this many total tokens, so ties break toward cheaper sessions."""
@@ -40,13 +40,15 @@ class RolloutSettings:
     model: str
     api_key: str
     base_url: str | None = None
-    summarize_at_tokens: int = 10_000
+    summarize_at_tokens: int = 9_000
+    """About 2.4k above the ~6.6k-token system prompt: low enough that a ten-question
+    session compacts two or three times and seals a rollup, far below production."""
     compaction_tail_tokens: int = 1_000
     compaction_fanout: int = 2
     max_depth: int = 1
     delegation_prompt: bool = True
     """Append the runtime's delegation guidance; it is fixed text, not a candidate."""
-    max_total_tokens: int = 300_000
+    max_total_tokens: int = 600_000
     exec_timeout: int = 60
     timeout_s: float = 900.0
 
@@ -86,6 +88,8 @@ class QuestionResult:
     check_note: str = ""
     after_compaction: bool = False
     turns: int = 0
+    skipped: bool = False
+    """Not asked (history_expand before any compaction); excluded from correctness."""
 
 
 @dataclass
@@ -147,19 +151,30 @@ async def run_rollout(
     """Run every question of ``task`` in one session; never raises."""
     session_dir = session_root / task.id / uuid.uuid4().hex[:8]
     rollout = Rollout(task_id=task.id, session_dir=str(session_dir))
-    answers: list[tuple[Question, str | None, int]] = []
+    answers: dict[int, tuple[str | None, int]] = {}
+    """Question position -> (reply, turns before it), for the questions asked."""
+    skipped: set[int] = set()
     engine: RLMEngine | None = None
     try:
         session = Session(session_dir=session_dir)
         engine = RLMEngine(
             cwd=task.cwd, session=session, runtime_config=_config(candidate, settings)
         )
-        for question in task.questions:
+        for position, question in enumerate(task.questions):
+            if (
+                question.check == "history_expand"
+                and not engine._metrics.num_compactions
+            ):
+                # Before a compaction question 1 is still in context, so the history
+                # API would be a pointless call.
+                skipped.add(position)
+                continue
             turns_before = engine._turn
             result = await asyncio.wait_for(
-                engine.prompt(question.prompt), timeout=settings.timeout_s
+                engine.prompt(numbered_prompt(position, question)),
+                timeout=settings.timeout_s,
             )
-            answers.append((question, result.answer, turns_before))
+            answers[position] = (result.answer, turns_before)
             if engine.stop_reason not in (None, "done"):
                 break
         rollout.prompt_tokens = engine._total_usage.prompt_tokens
@@ -178,27 +193,35 @@ async def run_rollout(
     if (session_dir / "messages.jsonl").exists():
         try:
             _digest(rollout, session_dir)
-            rollout.results = _score(task, answers, rollout, session_dir)
+            rollout.results = _score(task, answers, skipped, rollout, session_dir)
         except Exception as error:  # noqa: BLE001 - keep the answers' scores on a digest bug
             rollout.error = (rollout.error or "") + f"\ndigest failed: {error!r}"
             rollout.results = [
-                QuestionResult(q.kind, q.check, q.text, q.answer, a, score_answer(q, a))
-                for q, a, _ in answers
+                QuestionResult(
+                    q.kind,
+                    q.check,
+                    q.text,
+                    q.answer,
+                    answers[i][0],
+                    score_answer(q, answers[i][0]),
+                )
+                for i, q in enumerate(task.questions)
+                if i in answers
             ]
     else:
         rollout.results = [
             QuestionResult(q.kind, q.check, q.text, q.answer, None, 0.0)
             for q in task.questions
         ]
-    scored = [r.score for r in rollout.results]
-    rollout.correctness = sum(scored) / len(task.questions) if task.questions else 0.0
+    scored = [r.score for r in rollout.results if not r.skipped]
+    rollout.correctness = sum(scored) / len(scored) if scored else 0.0
     penalty = (
         0.05
         * (rollout.prompt_tokens + rollout.completion_tokens)
         / TOKENS_PER_PENALTY_POINT
     )
     rollout.score = round(max(0.0, rollout.correctness - penalty), 4)
-    rollout.final_answers = [answer or "" for _, answer, _ in answers]
+    rollout.final_answers = [answer or "" for answer, _ in answers.values()]
     return rollout
 
 
@@ -316,7 +339,8 @@ def _header(block: dict[str, Any]) -> str:
 
 def _score(
     task: Task,
-    answers: list[tuple[Question, str | None, int]],
+    answers: dict[int, tuple[str | None, int]],
+    skipped: set[int],
     rollout: Rollout,
     session_dir: Path,
 ) -> list[QuestionResult]:
@@ -330,14 +354,28 @@ def _score(
     first_compaction = (
         rollout.compactions[0].message_index if rollout.compactions else None
     )
+    asked_order = {position: k for k, position in enumerate(sorted(answers))}
     results = []
     for position, question in enumerate(task.questions):
-        answered = answers[position] if position < len(answers) else None
-        answer_text = answered[1] if answered else None
+        if position in skipped:
+            results.append(
+                QuestionResult(
+                    kind=question.kind,
+                    check=question.check,
+                    text=question.text,
+                    expected=None,
+                    answer=None,
+                    score=0.0,
+                    check_note="not asked: no compaction had happened yet",
+                    skipped=True,
+                )
+            )
+            continue
+        answered = answers.get(position)
+        answer_text = answered[0] if answered else None
+        order = asked_order.get(position, len(user_indices))
         asked_at = (
-            user_indices[position]
-            if position < len(user_indices)
-            else len(hist.messages)
+            user_indices[order] if order < len(user_indices) else len(hist.messages)
         )
         result = QuestionResult(
             kind=question.kind,
@@ -366,6 +404,8 @@ def _score(
                 result.score = 0.0
             elif question.check == "history_expand":
                 got = extract_answer(answer_text or "")
+                if got is not None:
+                    got = re.sub(r"^\W*Question\s+1\s*:\s*", "", got)
                 result.score = float(
                     got is not None
                     and _quoted_words(got) == _quoted_words(question.answer)

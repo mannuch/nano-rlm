@@ -25,6 +25,9 @@ QuestionKind = Literal[
     "line_count",
     "importers",
     "decorator_users",
+    "subclasses",
+    "longest_function",
+    "followup",
     "api",
 ]
 
@@ -47,6 +50,11 @@ class Question:
     @property
     def prompt(self) -> str:
         return f"{self.text}\n\n{ANSWER_FORMAT}"
+
+
+def numbered_prompt(position: int, question: Question) -> str:
+    """The prompt as sent: labelled so later questions can refer back by number."""
+    return f"Question {position + 1}: {question.prompt}"
 
 
 @dataclass
@@ -342,6 +350,81 @@ def _q_decorator_users(modules: list[_Module], rng: random.Random) -> Question |
     )
 
 
+def _base_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _q_subclasses(modules: list[_Module], rng: random.Random) -> Question | None:
+    defined: dict[str, int] = {}
+    subclasses: dict[str, list[str]] = {}
+    for m in modules:
+        for node in getattr(m.tree, "body", []):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            defined[node.name] = defined.get(node.name, 0) + 1
+            for base in node.bases:
+                if (name := _base_name(base)) is not None:
+                    subclasses.setdefault(name, []).append(f"{m.path}::{node.name}")
+    options = [
+        (name, sorted(set(entries)))
+        for name, entries in subclasses.items()
+        if defined.get(name) == 1 and 2 <= len(set(entries)) <= 8
+    ]
+    if not options:
+        return None
+    name, entries = rng.choice(options)
+    return Question(
+        kind="subclasses",
+        text=(
+            f"Which module-level classes in this repository list `{name}` directly among "
+            f"their base classes, written either as `{name}` or as an attribute ending in "
+            f"`.{name}`? Only direct bases count, not indirect inheritance, and classes "
+            "nested inside functions or other classes do not count. Answer with a "
+            "comma-separated list of `path::ClassName` entries."
+        ),
+        answer=entries,
+    )
+
+
+def _q_longest_function(modules: list[_Module], rng: random.Random) -> Question | None:
+    by_dir: dict[str, list[_Module]] = {}
+    for m in modules:
+        by_dir.setdefault(m.path.rpartition("/")[0], []).append(m)
+    options = []
+    for directory, members in by_dir.items():
+        if len(members) < 3:
+            continue
+        spans = sorted(
+            (
+                (fn.end_lineno or fn.lineno) - fn.lineno + 1,
+                f"{m.path}::{qualname}",
+            )
+            for m in members
+            for qualname, fn in _functions(m.tree)
+        )
+        if len(spans) >= 2 and spans[-1][0] > spans[-2][0]:
+            options.append((directory, spans[-1][1]))
+    if not options:
+        return None
+    directory, answer = rng.choice(options)
+    where = f"`{directory}/`" if directory else "the repository root"
+    return Question(
+        kind="longest_function",
+        text=(
+            "Which module-level function or method of a module-level class, among the "
+            f"`.py` files directly inside {where} (not in subdirectories), spans the most "
+            "lines, counting from its `def` line through its last line with decorators "
+            "excluded? Answer as `path::QualifiedName`, where the qualified name is "
+            "`function` or `Class.method`."
+        ),
+        answer=answer,
+    )
+
+
 REPO_GENERATORS = [
     _q_count_defs,
     _q_param_default,
@@ -350,7 +433,67 @@ REPO_GENERATORS = [
     _q_line_count,
     _q_importers,
     _q_decorator_users,
+    _q_subclasses,
+    _q_longest_function,
 ]
+
+_SUBJECT_FILE = {
+    "count_defs": "the file Question {n} asked about",
+    "param_default": "the file Question {n} asked about",
+    "decorator_users": "the file Question {n} asked about",
+    "line_count": "the file Question {n} asked about",
+    "test_containing": "the file that correctly answers Question {n}",
+}
+
+
+def _q_followup(
+    earlier: list[Question], modules: list[_Module], rng: random.Random
+) -> Question | None:
+    """A question about the subject of an earlier one, referring to it only by number,
+    so answering it after a compaction needs the earlier work carried forward."""
+    by_path = {m.path: m for m in modules}
+    options = []
+    for index, question in enumerate(earlier):
+        n = index + 1
+        if question.kind in _SUBJECT_FILE and question.path in by_path:
+            m = by_path[question.path]
+            subject = _SUBJECT_FILE[question.kind].format(n=n)
+            if question.kind != "line_count":
+                options.append(
+                    (
+                        f"How many lines does {subject} have, as `wc -l` would count them?",
+                        m.source.count("\n"),
+                    )
+                )
+            if question.kind != "count_defs":
+                options.append(
+                    (
+                        f"How many module-level definitions does {subject} contain, "
+                        "counting functions, async functions and classes together as one "
+                        "total? Count only definitions at module level.",
+                        len(_top_level_defs(m.tree)),
+                    )
+                )
+        elif question.kind in ("callers", "importers", "subclasses") and isinstance(
+            question.answer, list
+        ):
+            paths = sorted({entry.split("::")[0] for entry in question.answer})
+            sized = sorted(
+                (by_path[p].source.count("\n"), p) for p in paths if p in by_path
+            )
+            if len(sized) >= 2 and sized[-1][0] > sized[-2][0]:
+                options.append(
+                    (
+                        f"Among the distinct files that appear in the correct answer to "
+                        f"Question {n}, which one has the most lines, as `wc -l` would "
+                        "count them? Answer with its path.",
+                        sized[-1][1],
+                    )
+                )
+    if not options:
+        return None
+    text, answer = rng.choice(options)
+    return Question(kind="followup", text=text, answer=answer)
 
 
 def _q_shell_exit_code(rng: random.Random, repo: Path) -> Question:
@@ -428,9 +571,9 @@ def _q_history_expand(rng: random.Random, repo: Path) -> Question:
         kind="api",
         check="history_expand",
         text=(
-            "Using the conversation history API, retrieve the exact text of the first "
-            "question asked in this session and report its first six words separated by "
-            "single spaces, exactly as written."
+            "Using the conversation history API, retrieve the exact text of Question 1 "
+            "of this session and report the first six words of the question itself (after "
+            "its `Question 1:` label), separated by single spaces, exactly as written."
         ),
         answer=None,
     )
@@ -451,11 +594,13 @@ def make_tasks(
     name: str,
     count: int,
     seed: int = 0,
-    repo_questions: int = 4,
+    repo_questions: int = 6,
+    followups: int = 2,
     api_questions: int = 2,
 ) -> list[Task]:
-    """``count`` sessions over ``repo``: ``repo_questions`` distinct-file questions, then
-    ``api_questions`` runtime-surface questions, the last of which needs history."""
+    """``count`` sessions over ``repo``: ``repo_questions`` distinct-file questions,
+    ``followups`` questions about earlier ones' subjects, then ``api_questions``
+    runtime-surface questions, the last of which needs history after a compaction."""
     rng = random.Random(f"{name}:{seed}")
     modules = _modules(repo)
     tasks = []
@@ -473,6 +618,13 @@ def make_tasks(
             if question.path:
                 used_paths.add(question.path)
             questions.append(question)
+        earlier = questions[: max(1, len(questions) // 2)]
+        for _ in range(followups):
+            question = _q_followup(earlier, modules, rng)
+            if question is not None and question.text not in {
+                q.text for q in questions
+            }:
+                questions.append(question)
         api_kinds = [
             "shell_exit_code",
             "delegate_count",
@@ -571,7 +723,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--per-repo", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--repo-questions", type=int, default=4)
+    parser.add_argument("--repo-questions", type=int, default=6)
+    parser.add_argument("--followups", type=int, default=2)
     parser.add_argument("--api-questions", type=int, default=2)
     args = parser.parse_args(argv)
     tasks = []
@@ -584,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
                 count=args.per_repo,
                 seed=args.seed,
                 repo_questions=args.repo_questions,
+                followups=args.followups,
                 api_questions=args.api_questions,
             )
         )
