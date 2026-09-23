@@ -7,11 +7,13 @@ repeated after a compaction, and the outcome of each ``api`` question's ledger c
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import re
 import traceback
 import uuid
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,6 +88,8 @@ class QuestionResult:
     check_note: str = ""
     after_compaction: bool = False
     turns: int = 0
+    skipped: bool = False
+    """Not asked (history_expand before any compaction); excluded from correctness."""
 
 
 @dataclass
@@ -147,19 +151,30 @@ async def run_rollout(
     """Run every question of ``task`` in one session; never raises."""
     session_dir = session_root / task.id / uuid.uuid4().hex[:8]
     rollout = Rollout(task_id=task.id, session_dir=str(session_dir))
-    answers: list[tuple[Question, str | None, int]] = []
+    answers: dict[int, tuple[str | None, int]] = {}
+    """Question position -> (reply, turns before it), for the questions asked."""
+    skipped: set[int] = set()
     engine: RLMEngine | None = None
     try:
         session = Session(session_dir=session_dir)
         engine = RLMEngine(
             cwd=task.cwd, session=session, runtime_config=_config(candidate, settings)
         )
-        for question in task.questions:
+        for position, question in enumerate(task.questions):
+            if (
+                question.check == "history_expand"
+                and not engine._metrics.num_compactions
+            ):
+                # Before a compaction question 1 is still in context, so the history
+                # API would be a pointless call.
+                skipped.add(position)
+                continue
             turns_before = engine._turn
             result = await asyncio.wait_for(
-                engine.prompt(question.prompt), timeout=settings.timeout_s
+                engine.prompt(question.prompt),
+                timeout=settings.timeout_s,
             )
-            answers.append((question, result.answer, turns_before))
+            answers[position] = (result.answer, turns_before)
             if engine.stop_reason not in (None, "done"):
                 break
         rollout.prompt_tokens = engine._total_usage.prompt_tokens
@@ -178,27 +193,35 @@ async def run_rollout(
     if (session_dir / "messages.jsonl").exists():
         try:
             _digest(rollout, session_dir)
-            rollout.results = _score(task, answers, rollout, session_dir)
+            rollout.results = _score(task, answers, skipped, rollout, session_dir)
         except Exception as error:  # noqa: BLE001 - keep the answers' scores on a digest bug
             rollout.error = (rollout.error or "") + f"\ndigest failed: {error!r}"
             rollout.results = [
-                QuestionResult(q.kind, q.check, q.text, q.answer, a, score_answer(q, a))
-                for q, a, _ in answers
+                QuestionResult(
+                    q.kind,
+                    q.check,
+                    q.text,
+                    q.answer,
+                    answers[i][0],
+                    score_answer(q, answers[i][0]),
+                )
+                for i, q in enumerate(task.questions)
+                if i in answers
             ]
     else:
         rollout.results = [
             QuestionResult(q.kind, q.check, q.text, q.answer, None, 0.0)
             for q in task.questions
         ]
-    scored = [r.score for r in rollout.results]
-    rollout.correctness = sum(scored) / len(task.questions) if task.questions else 0.0
+    scored = [r.score for r in rollout.results if not r.skipped]
+    rollout.correctness = sum(scored) / len(scored) if scored else 0.0
     penalty = (
         0.05
         * (rollout.prompt_tokens + rollout.completion_tokens)
         / TOKENS_PER_PENALTY_POINT
     )
     rollout.score = round(max(0.0, rollout.correctness - penalty), 4)
-    rollout.final_answers = [answer or "" for _, answer, _ in answers]
+    rollout.final_answers = [answer or "" for answer, _ in answers.values()]
     return rollout
 
 
@@ -316,7 +339,8 @@ def _header(block: dict[str, Any]) -> str:
 
 def _score(
     task: Task,
-    answers: list[tuple[Question, str | None, int]],
+    answers: dict[int, tuple[str | None, int]],
+    skipped: set[int],
     rollout: Rollout,
     session_dir: Path,
 ) -> list[QuestionResult]:
@@ -330,14 +354,28 @@ def _score(
     first_compaction = (
         rollout.compactions[0].message_index if rollout.compactions else None
     )
+    asked_order = {position: k for k, position in enumerate(sorted(answers))}
     results = []
     for position, question in enumerate(task.questions):
-        answered = answers[position] if position < len(answers) else None
-        answer_text = answered[1] if answered else None
+        if position in skipped:
+            results.append(
+                QuestionResult(
+                    kind=question.kind,
+                    check=question.check,
+                    text=question.text,
+                    expected=None,
+                    answer=None,
+                    score=0.0,
+                    check_note="not asked: no compaction had happened yet",
+                    skipped=True,
+                )
+            )
+            continue
+        answered = answers.get(position)
+        answer_text = answered[0] if answered else None
+        order = asked_order.get(position, len(user_indices))
         asked_at = (
-            user_indices[position]
-            if position < len(user_indices)
-            else len(hist.messages)
+            user_indices[order] if order < len(user_indices) else len(hist.messages)
         )
         result = QuestionResult(
             kind=question.kind,
@@ -362,7 +400,16 @@ def _score(
             )
             result.check_ok, result.check_note = ok, note
             result.expected = question.answer
-            result.score = score_answer(question, answer_text) if ok else 0.0
+            if not ok:
+                result.score = 0.0
+            elif question.check == "history_expand":
+                got = extract_answer(answer_text or "")
+                result.score = float(
+                    got is not None
+                    and _quoted_words(got) == _quoted_words(question.answer)
+                )
+            else:
+                result.score = score_answer(question, answer_text)
         else:
             result.score = score_answer(question, answer_text)
         results.append(result)
@@ -437,23 +484,113 @@ def _check_harness_memory(question, rollout, hist, session_dir, asked_at):
     return True, f"memory recorded; local memory count {len(entries)}"
 
 
-def _check_history_cells(question, rollout, hist, session_dir, asked_at):
-    if not any("history" in c.code for c in _cells_after(rollout, asked_at)):
-        return False, "no cell used the history API after the question"
+HISTORY_SOURCES = {"history", "History"}
+
+
+def _parse_cell(code: str) -> ast.AST | None:
+    """The cell's AST (top-level ``await`` allowed), or None for IPython-only syntax."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            return compile(
+                code,
+                "<cell>",
+                "exec",
+                flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+            )
+    except SyntaxError:
+        return None
+
+
+def _binding_targets(node: ast.AST) -> list[tuple[ast.AST, ast.AST]]:
+    """(target, value) pairs for the statements and expressions that bind names."""
+    if isinstance(node, ast.Assign):
+        return [(target, node.value) for target in node.targets]
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
+        return [(node.target, node.value)]
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return [(node.target, node.iter)]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [
+            (item.optional_vars, item.context_expr)
+            for item in node.items
+            if item.optional_vars is not None
+        ]
+    return []
+
+
+def _history_cells(cells: list[Cell]) -> set[int]:
+    """Indices of cells that call the history API or read a value derived from it.
+
+    Kernel variables outlive compaction, so a ``hist`` bound for an earlier question is
+    still a history handle later: taint flows from ``history(...)``/``History(...)``
+    calls (and their import aliases) through assignments, in the order cells ran."""
+    sources = set(HISTORY_SOURCES)
+    tainted: set[str] = set()
+    used: set[int] = set()
+    for cell in sorted(cells, key=lambda c: c.index):
+        tree = _parse_cell(cell.code)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in (
+                "rlm",
+                "rlm.history",
+            ):
+                sources.update(
+                    alias.asname
+                    for alias in node.names
+                    if alias.name in HISTORY_SOURCES and alias.asname
+                )
+
+        def derived(expr: ast.AST) -> bool:
+            for sub in ast.walk(expr):
+                if isinstance(sub, ast.Call) and (
+                    (isinstance(sub.func, ast.Name) and sub.func.id in sources)
+                    or (
+                        isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr in HISTORY_SOURCES
+                    )
+                ):
+                    return True
+                if (
+                    isinstance(sub, ast.Name)
+                    and isinstance(sub.ctx, ast.Load)
+                    and sub.id in tainted
+                ):
+                    return True
+            return False
+
+        if derived(tree):
+            used.add(cell.index)
+        for node in ast.walk(tree):
+            for target, value in _binding_targets(node):
+                if derived(value):
+                    tainted.update(
+                        n.id for n in ast.walk(target) if isinstance(n, ast.Name)
+                    )
+    return used
+
+
+def _check_history_use(question, rollout, hist, session_dir, asked_at):
+    used = _history_cells(rollout.cells)
+    if not any(c.index in used for c in _cells_after(rollout, asked_at)):
+        return (
+            False,
+            "no cell after the question called the history API or read a value derived from it",
+        )
     return True, "used the history API"
 
 
-def _check_history_expand(question, rollout, hist, session_dir, asked_at):
-    cells = _cells_after(rollout, asked_at)
-    if not any("history" in c.code for c in cells):
-        return False, "no cell used the history API after the question"
-    return True, "used the history API"
+def _quoted_words(text: str) -> str:
+    """Words without the punctuation a model may add or drop when quoting."""
+    return " ".join(re.sub(r"[`'\",.]", " ", str(text)).split())
 
 
 CHECKS = {
     "shell_exit_code": _check_shell_exit_code,
     "delegate_count": _check_delegate_count,
     "harness_memory": _check_harness_memory,
-    "history_cells": _check_history_cells,
-    "history_expand": _check_history_expand,
+    "history_cells": _check_history_use,
+    "history_expand": _check_history_use,
 }

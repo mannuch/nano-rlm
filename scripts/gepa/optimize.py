@@ -2,7 +2,7 @@
 
     uv run --group gepa python scripts/gepa/optimize.py --tasks tasks.jsonl \\
         --run-dir scripts/gepa/runs/first --model deepseek/deepseek-v4.1-flash \\
-        --reflection-model anthropic/claude-fable-5.1 --max-metric-calls 300
+        --reflection-model openai/gpt-6-astra --max-metric-calls 300
 
 Re-running with the same ``--run-dir`` resumes from ``gepa_state.bin``. The result is a
 ``prompt_overrides`` object (``best_prompt_overrides.json``) plus ``report.md``; landing
@@ -16,6 +16,7 @@ import difflib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,7 +25,7 @@ import gepa  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
 from adapter import ExercisedComponentSelector, NanoRlmAdapter  # noqa: E402
-from components import FIRST_RUN_COMPONENTS, reflection_template  # noqa: E402
+from components import DEFAULT_COMPONENTS, reflection_template  # noqa: E402
 from rlm.prompt import DEFAULT_PROMPTS  # noqa: E402
 from rollout import RolloutSettings  # noqa: E402
 from tasks import read_tasks  # noqa: E402
@@ -32,11 +33,13 @@ from tasks import read_tasks  # noqa: E402
 
 class ReflectionLM:
     """A GEPA ``LanguageModel``: one chat completion per reflection prompt, with the
-    provider-reported token usage accumulated across the run."""
+    provider-reported token usage accumulated across the run and every exchange appended
+    to ``log_path``."""
 
-    def __init__(self, model: str, api_key: str, base_url: str | None):
+    def __init__(self, model: str, api_key: str, base_url: str | None, log_path: Path):
         self.model = model
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.log_path = log_path
         self.calls = 0
         self.tokens_in = 0
         self.tokens_out = 0
@@ -51,10 +54,25 @@ class ReflectionLM:
             model=self.model, messages=messages
         )
         self.calls += 1
-        if response.usage is not None:
-            self.tokens_in += response.usage.prompt_tokens or 0
-            self.tokens_out += response.usage.completion_tokens or 0
-        return response.choices[0].message.content or ""
+        usage = response.usage
+        if usage is not None:
+            self.tokens_in += usage.prompt_tokens or 0
+            self.tokens_out += usage.completion_tokens or 0
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        with open(self.log_path, "a", encoding="utf-8") as handle:
+            record = {
+                "time": time.time(),
+                "model": self.model,
+                "finish_reason": choice.finish_reason,
+                "refusal": getattr(choice.message, "refusal", None),
+                "prompt_tokens": usage.prompt_tokens if usage else None,
+                "completion_tokens": usage.completion_tokens if usage else None,
+                "messages": messages,
+                "response": content,
+            }
+            handle.write(json.dumps(record) + "\n")
+        return content
 
     def summary(self) -> str:
         return (
@@ -116,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reflection-model", required=True)
     parser.add_argument(
         "--components",
-        default=",".join(FIRST_RUN_COMPONENTS),
+        default=",".join(DEFAULT_COMPONENTS),
         help="Comma-separated registry names to optimize",
     )
     parser.add_argument("--max-metric-calls", type=int, default=300)
@@ -178,7 +196,9 @@ def main(argv: list[str] | None = None) -> int:
         f"train {len(trainset)} / val {len(valset)} tasks; components {components}; run_dir {run_dir}"
     )
 
-    reflection_lm = ReflectionLM(args.reflection_model, api_key, args.base_url)
+    reflection_lm = ReflectionLM(
+        args.reflection_model, api_key, args.base_url, run_dir / "reflection_log.jsonl"
+    )
     result = gepa.optimize(
         seed_candidate=seed,
         trainset=trainset,

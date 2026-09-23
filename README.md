@@ -749,16 +749,18 @@ from the AST or the filesystem (`tasks.py`: definition counts, parameter default
 callers, importers, decorator users, test locations, line counts) plus `api` questions
 that can only be answered by using a documented runtime surface (`rlm.shell.run`,
 `rlm.agent.spawn`, `h.create_memory`, the history API) and are checked against the
-session ledger as well as the answer. A session's score is the mean question score
-minus a small token penalty. Rollouts run with a low `summarize_at_tokens` so every
-session compacts and the compaction texts are exercised too.
+session ledger as well as the answer. The history question that quotes question 1 is
+only asked once the session has compacted, since before that the question is still in
+context. A session's score is the mean question score minus a small token penalty.
+Rollouts run with a `summarize_at_tokens` far below production so sessions compact and
+the compaction texts get evidence.
 
 ```bash
 uv run python scripts/gepa/workspace.py                     # pinned checkouts, one NAME=PATH per line
 uv run python scripts/gepa/tasks.py --repo nano-rlm=<path> --repo click=<path> --per-repo 20
 RLM_API_KEY=... RLM_BASE_URL=... uv run --group gepa python scripts/gepa/optimize.py \
     --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
-    --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
+    --model deepseek/deepseek-v4.1-flash --reflection-model openai/gpt-6-astra \
     --max-metric-calls 300
 ```
 
@@ -767,7 +769,8 @@ The first run optimizes `task`, `repl_doctrine`, `delegation_doctrine`, `checkpo
 candidate is checked before any rollout is spent: a text that is empty, longer than its
 allowance (twice the seed text or 1,200 characters, whichever is larger), or missing a
 token the runtime depends on (`components.py`, e.g.
-`hist.expand(` in `history`, `rlm.shell.run` in `runtime_reference`) scores zero with
+`hist.expand(` in `history`, `rlm.shell.run` in `runtime_reference`), or mentioning what
+exists only in these sessions (scoring, checks, the `ANSWER:` format) scores zero with
 feedback naming the problem. The component selector only proposes texts the minibatch
 actually exercised. A run is resumable from its `--run-dir` and ends with
 `best_prompt_overrides.json`, a `prompt_overrides` object any host can send, and

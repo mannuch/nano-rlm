@@ -44,6 +44,9 @@ gepa = [
     "gepa>=0.1.4,<0.2",
 ]
 
+[tool.ruff]
+extend-exclude = ["scripts/gepa/workspace"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

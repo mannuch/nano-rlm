@@ -54,8 +54,8 @@ default to 256.
 ```bash
 ulimit -n 4096
 nohup uv run --group gepa python scripts/gepa/optimize.py \
-  --tasks scripts/gepa/tasks.jsonl --run-dir scripts/gepa/runs/first \
-  --model deepseek/deepseek-v4.1-flash --reflection-model anthropic/claude-fable-5.1 \
+  --tasks scripts/gepa/tasks/tasks.jsonl --run-dir scripts/gepa/runs/first \
+  --model deepseek/deepseek-v4.1-flash --reflection-model openai/gpt-6-astra \
   --max-metric-calls 300 --minibatch 3 --concurrency 8 \
   > scripts/gepa/runs/first.log 2>&1 < /dev/null &
 disown
@@ -70,13 +70,14 @@ fixed), `--timeout 900` per question, and the first-run components (`task`, `rep
 `delegation_doctrine`, `checkpoint`, `rollup`, `staircase_framing`; `--components`
 selects others, including the reference texts).
 
-Wall time: plan on 10-15 hours for the ~500 rollouts a 300-call budget produces at
-concurrency 8. Each rollout is its own IPython kernel subprocess (plus a child session
-when the model delegates), so 8 is comfortable on a laptop; provider rate limits are the
-more likely ceiling. If `run_log_stderr.txt` shows 429 retries, drop to 6.
+Wall time: each metric call is one rollout, so a 300-call budget is 300 rollouts; at
+concurrency 8 that took about 2.5 hours. Each rollout is its own IPython kernel
+subprocess (plus a child session when the model delegates), so 8 is comfortable on a
+laptop; provider rate limits are the more likely ceiling. If `run_log_stderr.txt` shows
+429 retries, drop to 6.
 
-Cost: on the order of $15-35 per 300-call run with the models above (the task model's
-input tokens dominate; the reflection model is a few dollars). For a cheaper feel-out,
+Cost: a 300-call run spent about $5 on the task model (its input tokens dominate) plus
+a few dollars of reflection. For a cheaper feel-out,
 `--max-metric-calls 60` gives the seed evaluation plus 5-8 iterations for a few dollars.
 
 ## 6. Monitor
@@ -104,6 +105,8 @@ In `scripts/gepa/runs/first/`:
   the reflection model's token totals.
 - `best_prompt_overrides.json`: the `prompt_overrides` object (only the components that
   changed), which any ACP host can send in the runtime contract.
+- `reflection_log.jsonl`: every reflection call's prompt, raw response and
+  `finish_reason`, for diagnosing a proposal that came back empty or malformed.
 - `sessions/<task>/<id>/messages.jsonl`: every rollout's ledger, for reading what a
   candidate actually did.
 
