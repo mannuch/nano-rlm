@@ -7,11 +7,13 @@ repeated after a compaction, and the outcome of each ``api`` question's ledger c
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import re
 import traceback
 import uuid
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -486,16 +488,101 @@ def _check_harness_memory(question, rollout, hist, session_dir, asked_at):
     return True, f"memory recorded; local memory count {len(entries)}"
 
 
-def _check_history_cells(question, rollout, hist, session_dir, asked_at):
-    if not any("history" in c.code for c in _cells_after(rollout, asked_at)):
-        return False, "no cell used the history API after the question"
-    return True, "used the history API"
+HISTORY_SOURCES = {"history", "History"}
 
 
-def _check_history_expand(question, rollout, hist, session_dir, asked_at):
-    cells = _cells_after(rollout, asked_at)
-    if not any("history" in c.code for c in cells):
-        return False, "no cell used the history API after the question"
+def _parse_cell(code: str) -> ast.AST | None:
+    """The cell's AST (top-level ``await`` allowed), or None for IPython-only syntax."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            return compile(
+                code,
+                "<cell>",
+                "exec",
+                flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+            )
+    except SyntaxError:
+        return None
+
+
+def _binding_targets(node: ast.AST) -> list[tuple[ast.AST, ast.AST]]:
+    """(target, value) pairs for the statements and expressions that bind names."""
+    if isinstance(node, ast.Assign):
+        return [(target, node.value) for target in node.targets]
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and node.value:
+        return [(node.target, node.value)]
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return [(node.target, node.iter)]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [
+            (item.optional_vars, item.context_expr)
+            for item in node.items
+            if item.optional_vars is not None
+        ]
+    return []
+
+
+def _history_cells(cells: list[Cell]) -> set[int]:
+    """Indices of cells that call the history API or read a value derived from it.
+
+    Kernel variables outlive compaction, so a ``hist`` bound for an earlier question is
+    still a history handle later: taint flows from ``history(...)``/``History(...)``
+    calls (and their import aliases) through assignments, in the order cells ran."""
+    sources = set(HISTORY_SOURCES)
+    tainted: set[str] = set()
+    used: set[int] = set()
+    for cell in sorted(cells, key=lambda c: c.index):
+        tree = _parse_cell(cell.code)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in (
+                "rlm",
+                "rlm.history",
+            ):
+                sources.update(
+                    alias.asname
+                    for alias in node.names
+                    if alias.name in HISTORY_SOURCES and alias.asname
+                )
+
+        def derived(expr: ast.AST) -> bool:
+            for sub in ast.walk(expr):
+                if isinstance(sub, ast.Call) and (
+                    (isinstance(sub.func, ast.Name) and sub.func.id in sources)
+                    or (
+                        isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr in HISTORY_SOURCES
+                    )
+                ):
+                    return True
+                if (
+                    isinstance(sub, ast.Name)
+                    and isinstance(sub.ctx, ast.Load)
+                    and sub.id in tainted
+                ):
+                    return True
+            return False
+
+        if derived(tree):
+            used.add(cell.index)
+        for node in ast.walk(tree):
+            for target, value in _binding_targets(node):
+                if derived(value):
+                    tainted.update(
+                        n.id for n in ast.walk(target) if isinstance(n, ast.Name)
+                    )
+    return used
+
+
+def _check_history_use(question, rollout, hist, session_dir, asked_at):
+    used = _history_cells(rollout.cells)
+    if not any(c.index in used for c in _cells_after(rollout, asked_at)):
+        return (
+            False,
+            "no cell after the question called the history API or read a value derived from it",
+        )
     return True, "used the history API"
 
 
@@ -508,6 +595,6 @@ CHECKS = {
     "shell_exit_code": _check_shell_exit_code,
     "delegate_count": _check_delegate_count,
     "harness_memory": _check_harness_memory,
-    "history_cells": _check_history_cells,
-    "history_expand": _check_history_expand,
+    "history_cells": _check_history_use,
+    "history_expand": _check_history_use,
 }

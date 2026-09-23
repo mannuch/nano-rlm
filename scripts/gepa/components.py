@@ -16,13 +16,12 @@ DEFAULT_COMPONENTS = (
     "task",
     "repl_doctrine",
     "delegation_doctrine",
-    "history",
     "checkpoint",
     "rollup",
     "staircase_framing",
 )
-"""``history`` is a reference text rather than doctrine, but the questions that exercise
-the history API score lowest, so it is tuned by default (under the token guard)."""
+"""``history`` stays opt-in: the reflection model's provider has answered every reflection
+on it with ``finish_reason: content_filter`` and no text."""
 
 REFERENCE_COMPONENTS = (
     "runtime_reference",
@@ -85,7 +84,7 @@ LEAK_PATTERNS: dict[str, str] = {
     r"ANSWER:": "the benchmark's answer-line format",
     r"\bscor(?:e|es|ed|ing)\b": "scoring",
     r"\bgrad(?:er|ers|ed|ing)\b": "grading",
-    r"\bthe check\b|\bchecker\b": "the runtime checks",
+    r"\bruntime checks?\b": "the runtime checks",
     r"\bQuestion \d": "question numbering",
 }
 """What only the optimization sessions have: a rewrite that mentions them has learned

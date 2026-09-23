@@ -234,6 +234,20 @@ def test_ledger_checks_for_api_questions(tmp_path: Path):
     assert not CHECKS["history_cells"](
         history, _rollout([(4, "print(1)")]), None, tmp_path, 3
     )[0]
+    reused = _rollout(
+        [
+            (1, "hist = await history()\nmsgs = hist.messages"),
+            (2, "print(len(msgs))"),
+            (5, "q1 = msgs[1]['content']\nprint(q1.split()[:6])"),
+        ]
+    )
+    assert CHECKS["history_expand"](history, reused, None, tmp_path, 3)[0]
+    aliased = _rollout([(4, "from rlm import history as h\nprint(h().messages[1])")])
+    assert CHECKS["history_expand"](history, aliased, None, tmp_path, 3)[0]
+    unrelated = _rollout(
+        [(1, "hist = await history()"), (5, "msgs = [1]\nprint(msgs)")]
+    )
+    assert not CHECKS["history_expand"](history, unrelated, None, tmp_path, 3)[0]
 
 
 def test_history_expand_ignores_quoting_punctuation(tmp_path: Path):
@@ -272,6 +286,9 @@ def test_candidate_guard_names_dropped_tokens():
     leaked = validate_candidate({**seed, "task": "Keep the score high."}, seed)
     assert "optimization sessions (scoring)" in leaked["task"]
     assert validate_candidate({**seed, "task": "Use an underscore."}, seed) == {}
+    assert (
+        validate_candidate({**seed, "task": "Run only the check it names."}, seed) == {}
+    )
     assert (
         validate_candidate({**seed, "task": "  "}, seed)["task"]
         == "the rewritten text is empty"
