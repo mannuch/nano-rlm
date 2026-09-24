@@ -330,7 +330,9 @@ def agent_first_table(rows: list[dict]) -> list[str]:
     ]
     for arm in REFINING_ARMS:
         outcomes = [
-            r["after_agent"] for r in rows if r["arm"] == arm and r["after_agent"]
+            r.get("after_agent")
+            for r in rows
+            if r["arm"] == arm and r.get("after_agent")
         ]
         if outcomes:
             counts = [outcomes.count(o) for o in ("declined", "applied", "duplicated")]
