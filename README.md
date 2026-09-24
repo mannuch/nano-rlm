@@ -613,8 +613,10 @@ call. The **focus** call is asked only about the lessons that fired, stated as
 premises: per lesson, whether it is already recorded (a veto at `veto_threshold`) and
 which kind should hold it; per entry of the store the pass writes, whether it covers a
 lesson; per turn, whether it is direct evidence. Questions are worded
-for the pass's scope: a local pass serves later tasks in this session, a global pass
-(host `global: true`) future sessions. Code turns the answers into deterministic plan
+for the pass's scope: a local pass serves later work in this session (the rest of the
+current task, which may continue after older turns are summarized away, and any later
+tasks), a global pass (host `global: true`) future sessions. A fact or technique that
+served only a step already finished doesn't count. Code turns the answers into deterministic plan
 instructions naming the home kind (one kind when the choice's confidence reaches
 `home_confidence`), the entries to update or delete, the read-only entries a local entry
 should override, and quotes of the strongest turns.

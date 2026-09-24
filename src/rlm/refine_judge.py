@@ -64,17 +64,26 @@ CONTRADICTED = "harness_contradicted"
 GATE_SIGNALS = (*LESSON_SIGNALS, CONTRADICTED)
 
 HORIZONS = {
-    "local": "later tasks in this session",
+    "local": "later work in this session",
     "global": "tasks in future sessions",
 }
 """Who a pass's edits serve, by the scope of the store it writes: ``{horizon}`` in the
 question and lesson texts below."""
+HORIZON_NOTES = {
+    "local": " Later work in this session is the rest of the current task, which may go "
+    "on after older turns are summarized away, and any later tasks.",
+    "global": "",
+}
+"""``{horizon_note}`` in the gate questions: a local pass may serve a session of one
+task, where what helps is what the rest of that task needs again."""
 
 LESSONS = {
     "repeated_failure": "the same error or failed approach happened more than once",
-    "reusable_tactic": "a workspace-specific technique that worked and {horizon} need",
+    "reusable_tactic": "a workspace-specific technique that worked and will be needed "
+    "again in {horizon}",
     "delegation_role": "the same kind of subtask was delegated to child agents repeatedly",
-    "durable_fact": "a project fact or user preference that {horizon} will need",
+    "durable_fact": "a project fact or user preference that will be needed again in "
+    "{horizon}",
     "user_correction": "a user message corrected the assistant or redirected its work",
 }
 
@@ -89,13 +98,15 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
     "reusable_tactic": (
         "Do the messages in `turns` show a technique, command or procedure specific to "
-        "this workspace or task that worked and that {horizon} would need again?",
+        "this workspace or task that worked and that will be needed again in "
+        "{horizon}?{horizon_note}",
         "The assistant had to discover how to get something done here: a required flag, "
         "an entry point, a workaround, or a sequence of steps that the obvious approach "
         "missed.",
         "Only general methods a capable assistant already uses on any codebase, such as "
-        "reading files, searching with grep or parsing code with ast; or nothing that "
-        "worked generalizes beyond one answer.",
+        "reading files, searching with grep or parsing code with ast; nothing that "
+        "worked generalizes beyond one answer; or it served only a step that is already "
+        "finished, and {horizon} would not use it again.",
     ),
     "delegation_role": (
         "Do the messages in `turns` show the assistant delegating the same kind of "
@@ -106,12 +117,15 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
     "durable_fact": (
         "Do the messages in `turns` establish a fact about the project or workspace, or "
-        "a preference of the user, that {horizon} will need again?",
+        "a preference of the user, that will be needed again in {horizon}?"
+        "{horizon_note}",
         "The user stated a convention, preference or constraint, or the conversation "
         "uncovered a fact that is easy to get wrong, such as a required flag or a "
         "non-standard location.",
         "Only answers to the questions asked and facts that are quick to look up again, "
-        "such as what a file contains or where something is defined.",
+        "such as what a file contains or where something is defined; or facts that "
+        "served only a step that is already finished, and {horizon} would not use them "
+        "again.",
     ),
     "user_correction": (
         'Does a message in `turns` with role "user" correct the assistant or tell it to '
@@ -122,8 +136,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     ),
 }
 """Lesson signal -> ``(instructions, true, false)``: the Noul's question, then the
-``NoulCriteria`` descriptions of its yes and no outcomes. ``{horizon}`` is filled
-from ``HORIZONS``."""
+``NoulCriteria`` descriptions of its yes and no outcomes. ``{horizon}`` and
+``{horizon_note}`` are filled from ``HORIZONS`` and ``HORIZON_NOTES``."""
 
 HOME_KINDS = {
     "memory": "A memory: a durable fact, decision, failure, preference or outcome.",
@@ -298,10 +312,13 @@ def _noul(instructions: str, true: str, false: str) -> Noul:
 def gate_questions(evidence: dict[str, Any]) -> dict[str, Question]:
     """Call 1: one Noul per gate signal. The contradiction check is asked only when
     there are entries to contradict."""
-    horizon = HORIZONS[evidence["scope"]]
+    scope = evidence["scope"]
     questions: dict[str, Question] = {
         signal: _noul(
-            *(text.format(horizon=horizon) for text in _GATE_QUESTIONS[signal])
+            *(
+                text.format(horizon=HORIZONS[scope], horizon_note=HORIZON_NOTES[scope])
+                for text in _GATE_QUESTIONS[signal]
+            )
         )
         for signal in LESSON_SIGNALS
     }
@@ -394,8 +411,8 @@ def focus_questions(state: dict[str, Any], fired: list[str]) -> dict[str, Questi
             "No existing entry states it; recording it would add something new.",
         )
         questions[f"home_{signal}"] = Choice(
-            instructions=f"Where should {subject} be recorded so "
-            f"{HORIZONS[state['scope']]} benefit? Pick the smallest component that fits.",
+            instructions=f"Where should {subject} be recorded so it helps in "
+            f"{HORIZONS[state['scope']]}? Pick the smallest component that fits.",
             criteria=HOME_KINDS,
         )
     for k, _ in _editable(state) if lessons else []:
