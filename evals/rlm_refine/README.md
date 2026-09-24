@@ -74,7 +74,7 @@ Docker can't pull.
 
 - **Model:** `model` picks the task model; override it with `-m <id>`.
 - **Refinement cadence:** `refine_turn_interval` (8) sets how often an automatic pass runs.
-  Passes also run after each compaction, which `policy.summarize_at_tokens` (60k) makes
+  Passes also run after each compaction, which `policy.summarize_at_tokens` (25k) makes
   happen within a task.
 - **Scope:** only local harness stores are used. There's no `global_dir`, so nothing
   carries across tasks.

@@ -14,7 +14,7 @@ version = "0c8acf1ecd0703ff15504db468fb211ce84f7ff7"
 forward_env = ["TYPESAFE_API_KEY"]
 
 [env.agent.harness.policy]
-summarize_at_tokens = 60000
+summarize_at_tokens = 25000
 
 [env.agent.harness.harness]
 auto_refine = true
