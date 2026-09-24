@@ -4,6 +4,7 @@ aggregate the rows into a report. Pure functions: no model or network calls."""
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from collections import defaultdict
 from statistics import mean
 from typing import Any
@@ -97,14 +98,29 @@ def _top(choice: dict[str, Any]) -> str:
     return max(choice["probabilities"], key=choice["probabilities"].get)
 
 
+def recorded_before(
+    scenario: Scenario, final: dict[str, list[dict]], when: float
+) -> bool:
+    """Whether the agent recorded the scenario's lesson itself before ``when`` (the
+    pass's ledger timestamp): an entry it wrote in the store the pass targets."""
+    return scenario.lesson is not None and any(
+        entry.get("source") == "agent"
+        and datetime.fromisoformat(entry["updated_at"]).timestamp() < when
+        and matches(scenario.lesson, entry.get("title"), entry.get("content"))
+        for entry in final.get(scenario.scope, [])
+    )
+
+
 def judge_scores(
     scenario: Scenario,
     judge: dict[str, Any],
     lesson_index: int | None,
     threshold: float,
+    captured: set[str],
 ) -> dict[str, Any]:
     """How well the judge's two calls matched the scenario's labels. A score is None
-    when the scenario says nothing about it or the call that answers it did not run."""
+    when the scenario says nothing about it or the call that answers it did not run.
+    ``captured`` is the lessons the veto should drop."""
     fired = judge["fired"]
     focus = judge["focus"] or {}
     homes = [focus[f"home_{s}"] for s in fired if f"home_{s}" in focus]
@@ -129,12 +145,12 @@ def judge_scores(
             and focus.get(f"{label}_{entries.index(ref)}", 0.0) >= threshold
             for ref, label in scenario.expect_entries.items()
         )
-    vetoable = [s for s in fired if s in scenario.expect_captured]
+    vetoable = [s for s in fired if s in captured]
     if vetoable:
         scores["captured_hit"] = mean(
             focus.get(f"captured_{s}", 0.0) >= threshold for s in vetoable
         )
-    if lesson_index is not None and judge["focus"] is not None:
+    if lesson_index is not None and judge["gate_decision"]:
         scores["lesson_turn_hit"] = lesson_index in judge["evidence_turns"]
     return scores
 
@@ -149,7 +165,13 @@ def grade_case(
 ) -> dict[str, Any]:
     """One results row. ``records`` is the session ledger, ``final`` each store's
     entries after the run, by scope. A pass is applied (a ``refinement`` record) or not (a
-    ``refinement_declined`` record, whose ``reason`` says who declined)."""
+    ``refinement_declined`` record, whose ``reason`` says who declined).
+
+    When the agent recorded the lesson itself before the pass, the case is graded as
+    a decline (``expect_refine`` False, the scenario's own label kept as
+    ``label_refine``), checks that credit the pass are skipped, and the lesson's
+    signals are the ones the veto should drop. "lesson recorded" checks the outcome
+    whoever wrote it."""
     passes = [
         r
         for r in records
@@ -169,12 +191,25 @@ def grade_case(
             None,
         )
     edits = applied_edits(records)
+    first = last is not None and recorded_before(scenario, final, last["timestamp"])
+    checks = {
+        repr(check): check_edit(check, edits, final)
+        for check in scenario.edit_checks
+        if not (first and isinstance(check, (Created, Changed)))
+    }
+    if scenario.lesson is not None:
+        checks["lesson recorded"] = any(
+            matches(scenario.lesson, e.get("title"), e.get("content"))
+            for e in final.get(scenario.scope, [])
+        )
     row: dict[str, Any] = {
         "scenario": scenario.id,
         "family": scenario.family,
         "scope": scenario.scope,
         "arm": arm,
-        "expect_refine": scenario.expect_refine,
+        "label_refine": scenario.expect_refine,
+        "agent_recorded_first": first,
+        "expect_refine": scenario.expect_refine and not first,
         "decision": None,
         "declined_by": last.get("reason") if last else None,
         "rationale": None
@@ -184,12 +219,7 @@ def grade_case(
         else last["rationale"],
         "edits": [f"{e['action']} {e['kind']}:{e['id']}" for e in edits],
         "rejected_edits": rejected_edits(records),
-        "edit_checks": {
-            repr(check): check_edit(check, edits, final)
-            for check in scenario.edit_checks
-        }
-        if arm != "none"
-        else {},
+        "edit_checks": checks if arm != "none" else {},
         "probe": probe_score(scenario.probe.answer, probe_answer)
         if scenario.probe is not None
         else None,
@@ -200,7 +230,10 @@ def grade_case(
         row["decision"] = bool(last and last["type"] == "refinement")
     judge = last and last.get("judge")
     if judge and "error" not in judge:
-        row["judge"] = judge_scores(scenario, judge, lesson_index, threshold)
+        captured = (
+            scenario.expect_signals if first else set()
+        ) | scenario.expect_captured
+        row["judge"] = judge_scores(scenario, judge, lesson_index, threshold, captured)
         row["judge"]["gate"] = judge["gate"]
         row["judge"]["usage"] = judge["usage"]
     return row
@@ -334,8 +367,10 @@ def report(rows: list[dict], thresholds: list[float]) -> str:
     body = "\n\n".join(
         f"## {title}\n\n" + "\n".join(lines) for title, lines in sections
     )
+    first = sum(bool(r.get("agent_recorded_first")) for r in ok)
     return (
         f"# Refinement eval\n\n{len(rows)} cases, {len(rows) - len(ok)} errored or "
-        "failed.\n\n"
+        f"failed. In {first}, the agent recorded the lesson itself before the pass; "
+        "they are graded as declines.\n\n"
         f"{body}\n"
     )

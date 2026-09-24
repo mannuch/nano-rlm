@@ -14,6 +14,9 @@ from grade import check_edit, grade_case, probe_score, report, sweep  # noqa: E4
 from scenarios import BY_ID, AtMostOne, Changed, Created, NoCreate  # noqa: E402
 
 
+PASS_AT = 1_800_000_000.0
+
+
 def _edit(action, kind, id, content="", applied=True, scope="local"):
     return {
         "action": action,
@@ -36,6 +39,7 @@ def _ledger(steer, outcome, edits, scope="local"):
             {
                 "type": "refinement",
                 "trigger": "host",
+                "timestamp": PASS_AT,
                 "result": {
                     "applied_edits": edits,
                     "scope": scope,
@@ -45,7 +49,14 @@ def _ledger(steer, outcome, edits, scope="local"):
             }
         )
     else:
-        records.append({"type": "refinement_declined", "trigger": "host", **outcome})
+        records.append(
+            {
+                "type": "refinement_declined",
+                "trigger": "host",
+                "timestamp": PASS_AT,
+                **outcome,
+            }
+        )
     return records
 
 
@@ -133,6 +144,46 @@ def test_grade_case_scores_gate_focus_and_edits():
         "| threshold | call-1 accuracy |",
         "|---|---|",
         "| 0.95 | 0.00 |",
+    ]
+
+
+def test_a_lesson_the_agent_recorded_first_is_graded_as_a_decline():
+    """The agent saved the correction itself during the steering turns, so the
+    judge's veto is the right call and the pass is not blamed for creating nothing."""
+    scenario = BY_ID["user_correction"]
+    judge = {
+        "gate_decision": False,
+        "fired": ["user_correction"],
+        "gate": {"user_correction": 0.98},
+        "focus": {"captured_user_correction": 0.95},
+        "evidence_turns": [],
+        "entries": ["local:line_counting"],
+        "usage": {},
+    }
+    records = _ledger(
+        scenario.steer,
+        {"reason": "gate", "rationale": "already recorded", "judge": judge},
+        [],
+    )
+    saved = {
+        "title": "Line counting",
+        "content": "line counts never include blank lines",
+        "source": "agent",
+        "updated_at": "2027-01-15T07:00:00+00:00",  # before PASS_AT
+    }
+
+    row = grade_case(scenario, "typesafe", records, {"local": [saved]}, None, 0.7)
+
+    assert row["agent_recorded_first"] and row["label_refine"] is True
+    assert row["expect_refine"] is False and row["decision"] is False
+    assert row["edit_checks"] == {"lesson recorded": True}
+    assert row["judge"]["captured_hit"] == 1
+    assert row["judge"]["lesson_turn_hit"] is None
+    assert "In 1, the agent recorded the lesson itself" in report([row], [0.7])
+
+    later = {**saved, "updated_at": "2027-02-01T08:00:00+00:00"}  # during the probe
+    assert not grade_case(scenario, "typesafe", records, {"local": [later]}, None, 0.7)[
+        "agent_recorded_first"
     ]
 
 

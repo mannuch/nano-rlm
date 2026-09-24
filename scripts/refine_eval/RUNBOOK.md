@@ -123,13 +123,21 @@ uv run python scripts/refine_eval/run.py --run-dir scripts/refine_eval/runs/firs
 
 Errored cases and failed passes are counted in the header and left out of every table.
 
+The agent can write to its own harness at any time, and it sometimes records a
+correction itself during the steering turns. When a positive scenario's lesson was
+already recorded by the agent before the pass, the case is graded as a decline:
+declining, or the judge's "already recorded" veto, is then the right call. The
+header counts these cases, and a row keeps the scenario's own label as `label_refine`.
+Checks that credit the pass (`Created`, `Changed`) are skipped for them, and a
+`lesson recorded` check scores the outcome no matter who wrote the entry.
+
 | section | what it answers |
 |---|---|
 | Decision vs label | Per refining arm: accuracy, precision and recall of "applied edits" against the scenario's label, and the share of negative scenarios declined. |
 | Pass outcomes | Per arm and label: how many passes applied edits, were declined by the judge's gate, or were declined by the planner proposing no edits. |
 | Edit checks / probe score by family | Per scenario family and arm: the pass rate of the scenario's edit checks, and the probe score (compare against `none`). |
 | Judge focus | For arms where the judge ran: whether an expected signal fired, whether the lesson's home kind matched, whether expected entries were flagged, whether an already-recorded lesson was vetoed, whether the lesson's turn was picked as evidence, and how often a positive scenario got no focus at all. |
-| Call-1 threshold sweep | The `typesafe` arm's gate accuracy at thresholds 0.3–0.9, replayed from logged probabilities. Only call 1 can be replayed; other `veto_threshold` or `home_confidence` values need a new run. |
+| Call-1 threshold sweep | The `typesafe` arm's gate accuracy at thresholds 0.3–0.9, replayed from logged probabilities. Only call 1 can be replayed; other `veto_threshold` or `home_confidence` values need a new run. Call 1 cannot see that a lesson is already recorded (that is call 2's veto), so already-captured and agent-recorded cases lower its accuracy at every threshold. |
 
 What to look for:
 

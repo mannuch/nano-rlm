@@ -82,7 +82,11 @@ class Scenario:
     steer: list[str]
     expect_refine: bool
     lesson_steer: int | None = None
-    """Index into ``steer`` of the prompt that carries the lesson."""
+    """Index into ``steer`` of the prompt that carries the lesson, when a prompt does
+    (a lesson in tool output has none)."""
+    lesson: str | None = None
+    """Pattern an entry recording the lesson matches. The agent may record it itself
+    during the steering turns; the pass should then decline."""
     expect_signals: set[str] = field(default_factory=set)
     """At least one of these gate signals should fire."""
     expect_home: set[str] = field(default_factory=set)
@@ -168,6 +172,7 @@ SCENARIOS = [
             "includes blank lines. Recount notes.txt. " + ANSWER_FORMAT,
         ],
         lesson_steer=1,
+        lesson=BLANK_LINES,
         expect_refine=True,
         expect_signals={"user_correction", "durable_fact"},
         expect_home={"memory", "prompt"},
@@ -207,6 +212,7 @@ SCENARIOS = [
             f"Which file defines `load_config`? {ANSWER_FORMAT}",
         ],
         lesson_steer=0,
+        lesson=r"relative",
         expect_refine=True,
         expect_signals={"durable_fact", "user_correction"},
         expect_home={"memory", "prompt"},
@@ -234,7 +240,7 @@ SCENARIOS = [
             f"Run `python tools/report.py summary` and tell me the number. {ANSWER_FORMAT}",
             f"Now run `python tools/report.py errors` and tell me the number. {ANSWER_FORMAT}",
         ],
-        lesson_steer=0,
+        lesson=r"--root",
         expect_refine=True,
         expect_signals={"repeated_failure", "reusable_tactic", "durable_fact"},
         expect_home={"memory", "prompt", "skill"},
@@ -265,6 +271,7 @@ SCENARIOS = [
             "sentence.",
         ],
         lesson_steer=1,
+        lesson=r"summar",
         expect_refine=True,
         expect_signals={"delegation_role"},
         expect_home={"subagent"},
@@ -288,6 +295,7 @@ SCENARIOS = [
             "The command is `uv run pytest -p no:cacheprovider`.",
         ],
         lesson_steer=1,
+        lesson=r"uv run pytest",
         expect_refine=True,
         expect_signals={"harness_contradicted", "user_correction"},
         expect_entries={"local:test-command": "wrong"},
@@ -315,6 +323,7 @@ SCENARIOS = [
             "detailed answers that explain the reasoning behind them.",
         ],
         lesson_steer=1,
+        lesson=r"detail|reasoning",
         scope="global",
         expect_refine=True,
         expect_signals={"harness_contradicted", "user_correction", "durable_fact"},
@@ -343,6 +352,7 @@ SCENARIOS = [
             "setup. Use `uv run pytest -p no:cacheprovider` in this project.",
         ],
         lesson_steer=1,
+        lesson=r"uv run pytest",
         expect_refine=True,
         expect_signals={"harness_contradicted", "user_correction"},
         expect_entries={"global:test-command": "wrong"},
