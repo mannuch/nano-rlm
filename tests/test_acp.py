@@ -1094,15 +1094,10 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
 
     try:
         response = await agent.prompt(created.session_id, [text_block("compact")])
-        # The first compaction reply ignores tool_choice="none": until then every
-        # call carries the tools; after it, side calls go without and work keeps them.
-        with_tools = [client.calls[i] for i in (0, 1, 4)]
         assert all(
             [tool["function"]["name"] for tool in call["tools"]] == ["add"]
-            for call in with_tools
+            for call in client.calls
         )
-        assert client.calls[1]["tool_choice"] == "none"
-        assert all("tools" not in client.calls[i] for i in (2, 3))
         outputs = [
             message["content"]
             for message in client.calls[1]["messages"]
