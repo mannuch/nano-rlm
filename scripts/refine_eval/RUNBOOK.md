@@ -78,8 +78,8 @@ Before going further, check:
 
 ## 5. Full run
 
-Every scenario, every arm, 3 repeats: 11 scenarios × 3 refining arms, plus the `none`
-control for the 3 scenarios with a probe, is 36 cases per repeat and 108 in total. Run
+Every scenario, every arm, 3 repeats: 13 scenarios × 3 refining arms, plus the `none`
+control for the 3 scenarios with a probe, is 42 cases per repeat and 126 in total. Run
 it in `tmux` or under `nohup`:
 
 ```bash
@@ -137,18 +137,23 @@ uv run python scripts/refine_eval/run.py --run-dir scripts/refine_eval/runs/firs
 
 Errored cases and failed passes are counted in the header and left out of every table.
 
-The agent can write to its own harness at any time, and it sometimes records a
-correction itself during the steering turns. When a positive scenario's lesson was
-already recorded by the agent before the pass, the case is graded as a decline:
-declining, or the judge's "already recorded" veto, is then the right call. The
-header counts these cases, and a row keeps the scenario's own label as `label_refine`.
-Checks that credit the pass (`Created`, `Changed`) are skipped for them, and a
-`lesson recorded` check scores the outcome no matter who wrote the entry.
+The agent can write to its own harness at any time. In the second full run it fixed
+a contradicted entry itself during the steering turns in almost every stale-entry
+case, and occasionally recorded other lessons. When a positive scenario's lesson was
+already recorded by the agent before the pass (per the pre-pass snapshot, in any
+store the session sees), declining and folding more into the agent's entry are both
+fine, so the case has no expected decision (`expect_refine` is null; the scenario's
+own label stays in `label_refine`). It is left out of the decision tables and
+reported under "Agent recorded first", as declined, applied without a duplicate, or
+duplicated. Duplicating is the only real failure there. Checks that credit the pass
+(`Created`, `Changed`) are skipped for these cases, and a `lesson recorded` check
+scores the outcome no matter who wrote the entry.
 
 | section | what it answers |
 |---|---|
 | Decision vs label | Per refining arm: accuracy, precision and recall of "applied edits" against the scenario's label, and the share of negative scenarios declined. |
 | Pass outcomes | Per arm and label: how many passes applied edits, were declined by the judge's gate, or were declined by the planner proposing no edits. |
+| Agent recorded first | Per arm, for cases where the agent recorded the lesson before the pass: declined, applied without a duplicate, or duplicated. |
 | Edit checks / probe score by family | Per scenario family and arm: the pass rate of the scenario's edit checks, and the probe score (compare against `none`). |
 | Judge focus | For arms where the judge ran: whether an expected signal fired, whether the lesson's home kind matched, whether expected entries were flagged, whether an already-recorded lesson was vetoed, whether the lesson's turn was picked as evidence, and how often a positive scenario got no focus at all. |
 | Call-1 threshold sweep | The `typesafe` arm's gate accuracy at thresholds 0.3–0.9, replayed from logged probabilities. Only call 1 can be replayed; other `veto_threshold` or `home_confidence` values need a new run. Call 1 cannot see that a lesson is already recorded (that is call 2's veto), so already-captured and agent-recorded cases lower its accuracy at every threshold. |
@@ -192,10 +197,12 @@ To look at one case, find its row in `results.jsonl` (`session_dir` names the ca
 | `repeated_failure` | local | refine | a script fails the same way twice without `--root`; a probe runs it again |
 | `transient_failure` | local | decline | one timeout that succeeds on retry |
 | `delegation_role` | local | refine | two child agents spawned for the same kind of subtask |
-| `stale_entry` | local | refine | a seeded local memory the user contradicts |
+| `stale_entry` | local | refine | a seeded local memory of the test command, which the user contradicts, in a small Python project |
 | `global_stale_entry` | global | refine | a seeded global memory the user contradicts across projects |
-| `global_override` | local | refine | a seeded global memory contradicted for this repo only; expects a local override |
+| `global_override` | local | refine | a seeded global test-command memory contradicted for this project only, in a small Python project; expects a local override |
 | `session_fact_global` | global | decline | a fact the user limits to this session |
+| `stale_path` | local | refine | a seeded memory names a data path that tool output shows has moved; no one says so |
+| `consistent_entry` | local | decline | the same conversation when the memory already names the right path |
 
 To add one, append a `Scenario` in `scenarios.py` and give it:
 

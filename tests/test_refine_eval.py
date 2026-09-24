@@ -178,11 +178,34 @@ def test_a_lesson_the_agent_recorded_first_is_graded_as_a_decline():
             scenario, "typesafe", records, {store: [saved]}, {store: [saved]}, None, 0.7
         )
         assert row["agent_recorded_first"] and row["label_refine"] is True
-        assert row["expect_refine"] is False and row["decision"] is False
+        assert row["expect_refine"] is None and row["decision"] is False
+        assert row["after_agent"] == "declined"
         assert row["edit_checks"] == {"lesson recorded": True}
         assert row["judge"]["captured_hit"] == 1
         assert row["judge"]["lesson_turn_hit"] is None
-    assert "In 1, the agent recorded the lesson itself" in report([row], [0.7])
+    rendered = report([row], [0.7])
+    assert "In 1, the agent recorded the lesson itself" in rendered
+    assert "| typesafe | 1 | 1 | 0 | 0 |" in rendered
+    assert "| typesafe | nan" not in rendered  # no expected decision to score
+
+    copied = {"title": "Line counts", "content": "exclude blank lines"}
+    applied = _ledger(
+        scenario.steer, {}, [_edit("create", "memory", "line-counts", "blank")]
+    )
+    duplicated = grade_case(
+        scenario,
+        "force",
+        applied,
+        {"local": [saved]},
+        {"local": [saved, copied]},
+        None,
+        0.7,
+    )
+    assert duplicated["after_agent"] == "duplicated"
+    merged = grade_case(
+        scenario, "force", applied, {"local": [saved]}, {"local": [saved]}, None, 0.7
+    )
+    assert merged["after_agent"] == "applied"
 
     seeded = {**saved, "source": "eval"}
     assert not grade_case(

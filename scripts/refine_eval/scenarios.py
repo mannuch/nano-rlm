@@ -154,6 +154,43 @@ print("value: 314")
 MODULE_A = '"""Parse CSV rows into dicts keyed by header."""\n\ndef parse(rows):\n    header, *body = rows\n    return [dict(zip(header, r)) for r in body]\n'
 MODULE_B = '"""Retry a callable with exponential backoff."""\n\nimport time\n\ndef retry(fn, attempts=3):\n    for i in range(attempts):\n        try:\n            return fn()\n        except Exception:\n            time.sleep(2 ** i)\n    return fn()\n'
 
+PROJECT = {
+    "pyproject.toml": """[project]
+name = "app"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+""",
+    "src/app/__init__.py": "",
+    "src/app/config.py": CONFIG_PY,
+    "src/app/testing.py": '"""Pytest plugin: shared fixtures for the app tests."""\n',
+    "tests/conftest.py": 'pytest_plugins = ["app.testing"]\n',
+    "tests/test_config.py": """from app.config import merge
+
+
+def test_merge_prefers_extra():
+    assert merge({"a": 1}, {"a": 2}) == {"a": 2}
+""",
+}
+"""A small but complete project, so a question about running its tests is answerable
+inside the workspace instead of sending the agent looking elsewhere."""
+
+REPORT_V2_PY = """import json
+import sys
+from pathlib import Path
+
+DATA = Path(__file__).resolve().parents[1] / "var" / "data" / "counts.json"
+section = sys.argv[1]
+print(f"{section}: {json.loads(DATA.read_text())[section]}")
+"""
+REPORT_V2 = {
+    "tools/report.py": REPORT_V2_PY,
+    "var/data/counts.json": COUNTS,
+    "README.md": "Report tooling. The counts are regenerated nightly.\n",
+}
+
 BLANK_LINES = r"blank|empty line|non-empty"
 
 
@@ -280,7 +317,7 @@ SCENARIOS = [
     Scenario(
         id="stale_entry",
         family="stale entry",
-        files={"src/app/config.py": CONFIG_PY},
+        files=PROJECT,
         seed=[
             Seed(
                 "memory",
@@ -336,7 +373,7 @@ SCENARIOS = [
     Scenario(
         id="global_override",
         family="contradicted global entry (local pass)",
-        files={"src/app/config.py": CONFIG_PY},
+        files=PROJECT,
         seed=[
             Seed(
                 "memory",
@@ -372,6 +409,52 @@ SCENARIOS = [
         scope="global",
         expect_refine=False,
         edit_checks=[NoCreate(scope="global")],
+    ),
+    Scenario(
+        id="stale_path",
+        family="stale entry seen in tool output",
+        files=REPORT_V2,
+        seed=[
+            Seed(
+                "memory",
+                "report-data",
+                "Report data",
+                "The report counts live in data/counts.json; read that file for counts.",
+            )
+        ],
+        steer=[
+            f"How many errors are in the report counts? {ANSWER_FORMAT}",
+            f"And how many warnings? {ANSWER_FORMAT}",
+        ],
+        lesson=r"var/data",
+        expect_refine=True,
+        expect_signals={"harness_contradicted", "repeated_failure", "durable_fact"},
+        expect_entries={"local:report-data": "wrong"},
+        edit_checks=[
+            Changed("memory", "report-data"),
+            AtMostOne(r"var/data|data/counts"),
+        ],
+    ),
+    Scenario(
+        id="consistent_entry",
+        family="consistent entry (-)",
+        files=REPORT_V2,
+        seed=[
+            Seed(
+                "memory",
+                "report-data",
+                "Report data",
+                "The report counts live in var/data/counts.json; read that file for "
+                "counts.",
+            )
+        ],
+        steer=[
+            f"How many errors are in the report counts? {ANSWER_FORMAT}",
+            f"And how many warnings? {ANSWER_FORMAT}",
+        ],
+        expect_refine=False,
+        expect_captured={"durable_fact", "reusable_tactic"},
+        edit_checks=[NoCreate(r"counts|var/data"), AtMostOne(r"var/data")],
     ),
 ]
 

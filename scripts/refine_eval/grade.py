@@ -103,17 +103,26 @@ def visible_scopes(scenario: Scenario) -> tuple[str, ...]:
     return ("local", "global") if scenario.scope == "local" else ("global",)
 
 
+def lesson_entries(
+    scenario: Scenario, stores: dict[str, list[dict]], *, agent_only: bool = False
+) -> list[dict]:
+    """The entries in visible stores that record the scenario's lesson;
+    ``agent_only`` leaves out entries the eval seeded."""
+    if scenario.lesson is None:
+        return []
+    return [
+        entry
+        for scope in visible_scopes(scenario)
+        for entry in stores.get(scope, [])
+        if matches(scenario.lesson, entry.get("title"), entry.get("content"))
+        and not (agent_only and entry.get("source") == "eval")
+    ]
+
+
 def lesson_in(
     scenario: Scenario, stores: dict[str, list[dict]], *, agent_only: bool = False
 ) -> bool:
-    """Whether an entry in a visible store records the scenario's lesson;
-    ``agent_only`` leaves out entries the eval seeded."""
-    return scenario.lesson is not None and any(
-        matches(scenario.lesson, entry.get("title"), entry.get("content"))
-        and not (agent_only and entry.get("source") == "eval")
-        for scope in visible_scopes(scenario)
-        for entry in stores.get(scope, [])
-    )
+    return bool(lesson_entries(scenario, stores, agent_only=agent_only))
 
 
 def judge_scores(
@@ -176,10 +185,12 @@ def grade_case(
     ``refinement_declined`` record, whose ``reason`` says who declined).
 
     When the agent recorded the lesson itself before the pass (in any store the
-    session sees), the case is graded as
-    a decline (``expect_refine`` False, the scenario's own label kept as
-    ``label_refine``), checks that credit the pass are skipped, and the lesson's
-    signals are the ones the veto should drop. "lesson recorded" checks the outcome
+    session sees), declining and folding more into the agent's entry are both fine,
+    so the case has no expected decision (``expect_refine`` None, the scenario's own
+    label kept as ``label_refine``). ``after_agent`` says what the pass did instead:
+    ``declined``, ``applied`` or ``duplicated`` (the lesson ended up in more entries
+    than before). Checks that credit the pass are skipped, and the lesson's signals
+    are the ones the veto should drop. "lesson recorded" checks the outcome
     whoever wrote it, in any store the session sees."""
     passes = [
         r
@@ -215,7 +226,8 @@ def grade_case(
         "arm": arm,
         "label_refine": scenario.expect_refine,
         "agent_recorded_first": first,
-        "expect_refine": scenario.expect_refine and not first,
+        "expect_refine": None if first else scenario.expect_refine,
+        "after_agent": None,
         "decision": None,
         "declined_by": last.get("reason") if last else None,
         "rationale": None
@@ -234,6 +246,13 @@ def grade_case(
     }
     if arm in REFINING_ARMS:
         row["decision"] = bool(last and last["type"] == "refinement")
+        if first:
+            grew = len(lesson_entries(scenario, final)) > len(
+                lesson_entries(scenario, before)
+            )
+            row["after_agent"] = (
+                "duplicated" if grew else "applied" if row["decision"] else "declined"
+            )
     judge = last and last.get("judge")
     if judge and "error" not in judge:
         captured = (
@@ -259,7 +278,7 @@ def gate_table(rows: list[dict]) -> list[str]:
         "|---|---|---|---|---|",
     ]
     for arm in REFINING_ARMS:
-        cases = [r for r in rows if r["arm"] == arm]
+        cases = [r for r in rows if r["arm"] == arm and r["expect_refine"] is not None]
         if not cases:
             continue
         tp = sum(r["decision"] and r["expect_refine"] for r in cases)
@@ -297,6 +316,26 @@ def outcome_table(rows: list[dict]) -> list[str]:
                 f"| {arm} | {'refine' if label else 'decline'} | "
                 + " | ".join(str(c) for c in counts)
                 + " |"
+            )
+    return lines
+
+
+def agent_first_table(rows: list[dict]) -> list[str]:
+    """Per arm, for cases where the agent recorded the lesson itself before the pass:
+    whether the pass declined, applied edits without adding a copy of the lesson, or
+    duplicated it (the only real failure here)."""
+    lines = [
+        "| arm | cases | declined | applied without a duplicate | duplicated |",
+        "|---|---|---|---|---|",
+    ]
+    for arm in REFINING_ARMS:
+        outcomes = [
+            r["after_agent"] for r in rows if r["arm"] == arm and r["after_agent"]
+        ]
+        if outcomes:
+            counts = [outcomes.count(o) for o in ("declined", "applied", "duplicated")]
+            lines.append(
+                f"| {arm} | {len(outcomes)} | " + " | ".join(map(str, counts)) + " |"
             )
     return lines
 
@@ -346,7 +385,11 @@ def sweep(rows: list[dict], thresholds: list[float]) -> list[str]:
     """Gate-call accuracy of the ``typesafe`` arm at other thresholds, recomputed from
     logged probabilities. Only call 1 can be replayed: call 2 was asked about the
     lessons that fired at the threshold the run used."""
-    cases = [r for r in rows if r["arm"] == "typesafe" and r["judge"]]
+    cases = [
+        r
+        for r in rows
+        if r["arm"] == "typesafe" and r["judge"] and r["expect_refine"] is not None
+    ]
     lines = ["| threshold | call-1 accuracy |", "|---|---|"]
     for t in thresholds:
         if not cases:
@@ -366,6 +409,7 @@ def report(rows: list[dict], thresholds: list[float]) -> str:
     sections = [
         ("Decision vs label", gate_table(ok)),
         ("Pass outcomes", outcome_table(ok)),
+        ("Agent recorded first", agent_first_table(ok)),
         ("Edit checks / probe score by family", family_table(ok)),
         ("Judge focus", judge_table(ok)),
         ("Call-1 threshold sweep (typesafe arm)", sweep(ok, thresholds)),
@@ -378,6 +422,7 @@ def report(rows: list[dict], thresholds: list[float]) -> str:
     return (
         f"# Refinement eval\n\n{len(rows)} cases, {len(rows) - len(ok)} errored or "
         f"failed. In {first}, the agent recorded the lesson itself before the pass; "
-        f"they are graded as declines. {leaked} reached into this repository.\n\n"
+        "they have no expected decision and are reported under Agent recorded first. "
+        f"{leaked} reached into this repository.\n\n"
         f"{body}\n"
     )
