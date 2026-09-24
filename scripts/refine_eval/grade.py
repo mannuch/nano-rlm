@@ -177,7 +177,11 @@ def grade_case(
         "expect_refine": scenario.expect_refine,
         "decision": None,
         "declined_by": last.get("reason") if last else None,
-        "rationale": last.get("rationale") if last else None,
+        "rationale": None
+        if last is None
+        else last["result"]["rationale"]
+        if last["type"] == "refinement"
+        else last["rationale"],
         "edits": [f"{e['action']} {e['kind']}:{e['id']}" for e in edits],
         "rejected_edits": rejected_edits(records),
         "edit_checks": {

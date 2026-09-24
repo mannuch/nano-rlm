@@ -69,7 +69,7 @@ question and lesson texts below."""
 
 LESSONS = {
     "repeated_failure": "the same error or failed approach happened more than once",
-    "reusable_tactic": "a technique that worked and would help {horizon}",
+    "reusable_tactic": "a workspace-specific technique that worked and {horizon} need",
     "delegation_role": "the same kind of subtask was delegated to child agents repeatedly",
     "durable_fact": "a project fact or user preference that {horizon} will need",
     "user_correction": "a user message corrected the assistant or redirected its work",
@@ -85,10 +85,14 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
         "Each failure happened once, the failures are unrelated, or nothing failed.",
     ),
     "reusable_tactic": (
-        "Do the messages in `turns` show a technique, command or procedure that worked "
-        "and would help with {horizon}?",
-        "A concrete approach succeeded and could be reused on {horizon}.",
-        "Nothing that worked generalizes beyond the answer to one question.",
+        "Do the messages in `turns` show a technique, command or procedure specific to "
+        "this workspace or task that worked and that {horizon} would need again?",
+        "The assistant had to discover how to get something done here: a required flag, "
+        "an entry point, a workaround, or a sequence of steps that the obvious approach "
+        "missed.",
+        "Only general methods a capable assistant already uses on any codebase, such as "
+        "reading files, searching with grep or parsing code with ast; or nothing that "
+        "worked generalizes beyond one answer.",
     ),
     "delegation_role": (
         "Do the messages in `turns` show the assistant delegating the same kind of "
@@ -100,9 +104,11 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
     "durable_fact": (
         "Do the messages in `turns` establish a fact about the project or workspace, or "
         "a preference of the user, that {horizon} will need again?",
-        "A lasting fact or preference: a convention, a location, a required flag, a "
-        "format the user wants.",
-        "Only one-off answers and transient progress; nothing {horizon} would need.",
+        "The user stated a convention, preference or constraint, or the conversation "
+        "uncovered a fact that is easy to get wrong, such as a required flag or a "
+        "non-standard location.",
+        "Only answers to the questions asked and facts that are quick to look up again, "
+        "such as what a file contains or where something is defined.",
     ),
     "user_correction": (
         'Does a message in `turns` with role "user" correct the assistant or tell it to '

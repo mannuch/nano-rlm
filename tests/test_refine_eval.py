@@ -36,7 +36,11 @@ def _ledger(steer, outcome, edits, scope="local"):
             {
                 "type": "refinement",
                 "trigger": "host",
-                "result": {"applied_edits": edits, "scope": scope},
+                "result": {
+                    "applied_edits": edits,
+                    "scope": scope,
+                    "rationale": "the user corrected it",
+                },
                 **outcome,
             }
         )
@@ -101,6 +105,7 @@ def test_grade_case_scores_gate_focus_and_edits():
     row = grade_case(scenario, "typesafe", records, final, None, 0.7)
 
     assert row["decision"] is True and row["expect_refine"] is True
+    assert row["rationale"] == "the user corrected it"
     assert all(row["edit_checks"].values())
     assert row["judge"]["signal_hit"] and row["judge"]["home_hit"] is None
     assert row["judge"]["entry_hit"] == 1 and row["judge"]["lesson_turn_hit"]
@@ -116,7 +121,7 @@ def test_grade_case_scores_gate_focus_and_edits():
         0.7,
     )
     assert declined["decision"] is False and declined["judge"] is None
-    assert declined["declined_by"] == "no_edits"
+    assert declined["declined_by"] == "no_edits" and declined["rationale"] == "noise"
 
     failed = {**declined, "declined_by": "failed"}
     rendered = report([row, declined, failed], [0.5, 0.9])
