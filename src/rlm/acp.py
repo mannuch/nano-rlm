@@ -65,6 +65,7 @@ CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 REFINE_METADATA_KEY = "ai.prime.rlm/refine-v1"
+REFINEMENTS_METADATA_KEY = "ai.prime.rlm/refinements-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
 
 
@@ -540,7 +541,10 @@ class RLMACPAgent(Agent):
                 state.delivery_task.cancel()
             async with state.lock:
                 await state.engine.aclose()
-            return _session_metadata(state)
+            return {
+                **_session_metadata(state),
+                REFINEMENTS_METADATA_KEY: state.engine.refinement_records,
+            }
         finally:
             if self._sessions.get(session_id) is state:
                 self._sessions.pop(session_id)

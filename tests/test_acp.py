@@ -19,6 +19,7 @@ from rlm.acp import (
     ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     REFINE_METADATA_KEY,
+    REFINEMENTS_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
     RLMACPAgent,
@@ -107,6 +108,7 @@ class _Engine:
         self.prompt_started = asyncio.Event()
         self.closed = False
         self.stop_reason = "done"
+        self.refinement_records = [{"type": "refinement_declined", "reason": "gate"}]
         self.instances.append(self)
 
     async def prompt(self, prompt: str, *, refine: dict | None = None) -> RLMResult:
@@ -1061,6 +1063,8 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert closed_snapshot["last_stop_reason"] == "done"
     assert "semantic_edges" not in closed_snapshot
     assert closed.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
+    assert closed.field_meta[REFINEMENTS_METADATA_KEY] == engine.refinement_records
+    assert REFINEMENTS_METADATA_KEY not in second.field_meta
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
 

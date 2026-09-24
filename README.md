@@ -59,7 +59,8 @@ fall back to process environment configuration.
 Credentials travel over the private ACP stdio channel and are never echoed.
 The `session/close` response carries one authoritative, credential-free
 snapshot of cumulative usage, metrics, tool-call stats, supervisor counters,
-and limits under `ai.prime.rlm/session-v1`.
+and limits under `ai.prime.rlm/session-v1`, and the session's refinement passes
+(applied or declined, with any judge verdict) under `ai.prime.rlm/refinements-v1`.
 
 Every actual model call carries a standard HTTP `Idempotency-Key` header that
 stays stable across SDK and outer retries (retry attempts are distinguished by
@@ -639,9 +640,10 @@ reported as failed in the conversation and the run continues. A pass is one plan
 request (plus any resampled attempts), each carrying a `refinement_attempt` semantic edge
 from the last work request; an applied plan becomes the source of a `refinement` edge into
 the next work request, which also keeps its ordinary `continuation` edge. A declined plan
-is a dead end, and a pass the judge declines makes no request at all. Refinement counts and
-edit totals appear in the session metrics; the `session-v1` snapshot carries per-scope entry
-counts under `harness`.
+is a dead end, and a pass the judge declines makes no request at all. Refinement counts,
+edit totals, declines by reason and the judge's reviews, errors, input tokens and
+disagreements with the planner appear in the session metrics; the `session-v1` snapshot
+carries per-scope entry counts under `harness`.
 
 ### Episodes
 

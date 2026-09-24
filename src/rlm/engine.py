@@ -91,6 +91,8 @@ from rlm.types import (
     CompactionApplied,
     ProgrammaticToolCallStats,
     RefinementApplied,
+    RefinementDeclined,
+    RefinementJudged,
     RLMMetrics,
     RLMResult,
     TokenUsage,
@@ -229,6 +231,27 @@ class _Pass:
     failed: str | None = None
 
 
+def _judge_summary(record: dict[str, Any]) -> RefinementJudged | None:
+    judge = record.get("judge")
+    if judge is None:
+        return None
+    return RefinementJudged(
+        would_refine=None if "error" in judge else judge["gate_decision"],
+        input_tokens=sum(
+            call.get("input_tokens") or 0 for call in judge.get("usage", {}).values()
+        ),
+    )
+
+
+def _pass_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    """A pass's ledger record without what it put in the conversation."""
+    return {
+        key: value
+        for key, value in entry.items()
+        if key not in ("message", "provenance", "rebuilt_window")
+    }
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -321,6 +344,7 @@ class RLMEngine:
 
         # Continual harness refinement bookkeeping.
         self._refinement_count = 0
+        self._refinement_records: list[dict[str, Any]] = []
         self._turns_since_refine_review = 0
         self._last_refine_review_at: float | None = None
         # Blocks the latest compaction produced, pending an auto-refine review.
@@ -1661,6 +1685,12 @@ class RLMEngine:
                 sealed.append(block)
         return sealed
 
+    @property
+    def refinement_records(self) -> list[dict[str, Any]]:
+        """This engine's refinement passes, applied or not, as in the ledger but
+        without what they put in the conversation."""
+        return list(self._refinement_records)
+
     def execution_snapshot(self) -> dict:
         """Return a credential-free snapshot of cumulative execution state."""
         if self.session is None:
@@ -1873,6 +1903,7 @@ class RLMEngine:
                     verdict = await self._refine_judge.review(state, force=not gate)
                 except TypeSafeError as error:
                     logger.warning("rlm: refinement judge failed: %s", error)
+                    record["judge"] = {"mode": mode, "error": str(error)}
                     if gate:
                         self._log_refinement_declined(
                             record,
@@ -1880,7 +1911,6 @@ class RLMEngine:
                             rationale=f"review failed: {error}",
                         )
                         return _Pass(failed=f"review failed: {error}")
-                    record["judge"] = {"mode": mode, "error": str(error)}
                 else:
                     record["judge"] = {"mode": mode, **verdict.record()}
                     if not verdict.should_refine:
@@ -2035,23 +2065,23 @@ class RLMEngine:
         message, provenance = runtime_event(
             "refinement", notice_text(result), trigger=trigger, scope=result.scope
         )
-        self.session.log(
-            {
-                "type": "refinement",
-                **record,
-                "result": result.to_dict(),
-                "rebuilt_window": window,
-                "message": message,
-                "provenance": provenance,
-            },
-            in_context=True,
-        )
+        entry = {
+            "type": "refinement",
+            **record,
+            "result": result.to_dict(),
+            "rebuilt_window": window,
+            "message": message,
+            "provenance": provenance,
+        }
+        self.session.log(entry, in_context=True)
+        self._refinement_records.append(_pass_summary(entry))
         applied = sum(1 for e in result.applied_edits if e.applied)
         self._metrics.record(
             RefinementApplied(
                 trigger=trigger,
                 edits_applied=applied,
                 edits_rejected=len(result.applied_edits) - applied,
+                judge=_judge_summary(record),
             )
         )
         if refinement is not None:
@@ -2081,6 +2111,12 @@ class RLMEngine:
             message, provenance = runtime_event("refinement", notice, reason=reason)
             entry.update(message=message, provenance=provenance)
         self.session.log(entry, in_context=notice is not None)
+        self._refinement_records.append(_pass_summary(entry))
+        self._metrics.record(
+            RefinementDeclined(
+                trigger=record["trigger"], reason=reason, judge=_judge_summary(record)
+            )
+        )
 
     def _install_system_prompt(self, task_text: str) -> int | None:
         """Build the system prompt and make it the context's first message.

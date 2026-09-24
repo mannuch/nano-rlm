@@ -542,6 +542,14 @@ async def test_typesafe_gate_decides_before_the_planning_call(session):
     assert "message" not in declined
     metrics = engine.execution_snapshot()["metrics"]
     assert metrics["num_auto_refine_reviews"] == 2 and metrics["num_refinements"] == 1
+    assert metrics["num_refinements_declined_gate"] == 1
+    assert (metrics["num_judge_reviews"], metrics["judge_input_tokens"]) == (2, 30)
+    assert metrics["num_judge_would_decline_applied"] == 0
+    assert [r["type"] for r in engine.refinement_records] == [
+        "refinement",
+        "refinement_declined",
+    ]
+    assert "rebuilt_window" not in engine.refinement_records[0]
     edges = _edges(engine)
     assert edges.count("refinement_attempt") == 1 and edges.count("refinement") == 1
 
@@ -571,6 +579,9 @@ async def test_shadow_judge_is_logged_beside_the_deciding_plan(session):
     assert declined["judge"]["mode"] == "shadow"
     assert declined["judge"]["gate_decision"] is True
     assert "Record it as a memory." in declined["judge"]["instructions"]
+    metrics = engine.execution_snapshot()["metrics"]
+    assert metrics["num_refinements_declined_no_edits"] == 1
+    assert metrics["num_judge_would_refine_declined"] == 1
 
 
 async def test_host_review_and_focus_by_the_judge(session):
