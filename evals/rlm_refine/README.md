@@ -43,9 +43,15 @@ From this directory:
 
 ```bash
 uv sync --python 3.12
-export PRIME_API_KEY=...        # task model, through Prime inference (verifiers' default client)
+export PRIME_API_KEY=...        # or run `prime login` once (see below)
 export TYPESAFE_API_KEY=...     # the judge, from https://console.typesafe.ai/
 ```
+
+The Prime key covers the sandboxes, the tunnel from the sandboxes back to your machine,
+and the task model, which runs on Prime Inference (verifiers' default client). Instead of
+exporting it, you can run `prime login` once. All three read `api_key` from
+`~/.prime/config.json` when `PRIME_API_KEY` is unset, and an exported `PRIME_API_KEY` takes
+precedence. There's no such fallback for `TYPESAFE_API_KEY`, so always export it.
 
 `forward_env = ["TYPESAFE_API_KEY"]` in the configs hands the key to the harness. The
 harness puts it into the judge's config at launch, so it never appears in the saved config.
