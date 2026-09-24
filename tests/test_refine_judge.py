@@ -10,11 +10,13 @@ from conftest import FakeTypeSafe
 from rlm.config import RefineJudgeConfig
 from rlm.harness import build_view
 from rlm.provenance import runtime_event
+from rlm.staircase import Block
 from rlm.refine_judge import (
     CONTRADICTED,
     RefineJudge,
     build_evidence,
     decide_focus,
+    WORKING_NOTES,
     decide_gate,
     focus_questions,
     focus_state,
@@ -101,6 +103,24 @@ def test_gate_asks_about_each_contradictable_entry_and_fires_at_threshold(tmp_pa
     answers = {"user_correction": 0.7, "durable_fact": 0.69, "wrong_1": 0.9}
     assert decide_gate(answers, 0.7) == ["user_correction", CONTRADICTED]
     assert decide_gate({"wrong_0": 0.6}, 0.7) == []
+
+
+def test_working_notes_are_asked_only_in_a_local_pass_after_a_compaction(tmp_path):
+    block = Block(
+        tier=1,
+        branches=(0, 1),
+        messages=(1, 4),
+        windows=(0, 0),
+        turns=(0, 2),
+        summary="found the config at /etc/app.toml; the v2 parser is ruled out",
+        request_id="r",
+    )
+    compacted = _evidence(tmp_path / "a", [], blocks=[block])
+    assert WORKING_NOTES in gate_questions(compacted)
+    assert WORKING_NOTES not in gate_questions(_evidence(tmp_path / "b", []))
+    global_pass = _evidence(tmp_path / "c", [], blocks=[block], scope="global")
+    assert WORKING_NOTES not in gate_questions(global_pass)
+    assert decide_gate({WORKING_NOTES: 0.8}, 0.7) == [WORKING_NOTES]
 
 
 def test_focus_questions_follow_what_fired(tmp_path):

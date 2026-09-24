@@ -13,8 +13,10 @@ whole conversation does not fit Jev's 32k-token state budget):
    Per entry of the store the pass writes: does it cover a lesson. Per turn: is it
    direct evidence for a lesson.
 
-Questions are worded for the pass's scope: a local pass serves later tasks in this
-session, a global pass future sessions.
+Questions are worded for the pass's scope: a local pass serves later work in this
+session, a global pass future sessions. A local pass that a compaction started is also
+asked whether the task still needs working notes: state from the turns just summarized
+away that the rest of the task needs.
 
 Code turns the answers into a verdict and deterministic instructions for the planning
 call, which the task model still makes.
@@ -52,12 +54,15 @@ _EXCEPTION_RE = re.compile(
     r"^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))\b", re.MULTILINE
 )
 
+WORKING_NOTES = "working_notes"
+"""Asked only in a local pass that a compaction started (see ``asks_working_notes``)."""
 LESSON_SIGNALS = (
     "repeated_failure",
     "reusable_tactic",
     "delegation_role",
     "durable_fact",
     "user_correction",
+    WORKING_NOTES,
 )
 CONTRADICTED = "harness_contradicted"
 """Fired when any entry's ``wrong_<k>`` gate question fires."""
@@ -85,6 +90,8 @@ LESSONS = {
     "durable_fact": "a project fact or user preference that will be needed again in "
     "{horizon}",
     "user_correction": "a user message corrected the assistant or redirected its work",
+    WORKING_NOTES: "task state from turns just summarized away that the rest of the "
+    "current task still needs",
 }
 
 _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
@@ -133,6 +140,18 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
         "The user says the assistant was wrong, rejects its approach, or states a rule "
         "it should follow.",
         "User messages only ask questions or give new tasks.",
+    ),
+    WORKING_NOTES: (
+        "Older turns of this conversation were just summarized away: "
+        "`compaction_blocks` holds their summaries and `turns` what remains since the "
+        "last review. Is the current task still unfinished, with specific state from "
+        "that earlier work that finishing it needs and that a short summary could blur "
+        "or drop?",
+        "The task is not done, and finishing it needs specific details from earlier "
+        "work: a decision made, a constraint found, an approach ruled out, or an exact "
+        "path, identifier, command or value.",
+        "The task is done or nearly done, or the earlier work is general progress that "
+        "the summaries already carry; nothing specific from it is needed again.",
     ),
 }
 """Lesson signal -> ``(instructions, true, false)``: the Noul's question, then the
@@ -310,8 +329,9 @@ def _noul(instructions: str, true: str, false: str) -> Noul:
 
 
 def gate_questions(evidence: dict[str, Any]) -> dict[str, Question]:
-    """Call 1: one Noul per gate signal. The contradiction check is asked only when
-    there are entries to contradict."""
+    """Call 1: one Noul per gate signal. Working notes are asked only after a
+    compaction (``asks_working_notes``), the contradiction check only when there are
+    entries to contradict."""
     scope = evidence["scope"]
     questions: dict[str, Question] = {
         signal: _noul(
@@ -321,6 +341,7 @@ def gate_questions(evidence: dict[str, Any]) -> dict[str, Question]:
             )
         )
         for signal in LESSON_SIGNALS
+        if signal != WORKING_NOTES or asks_working_notes(evidence)
     }
     for k, _ in _contradictable(evidence):
         questions[f"wrong_{k}"] = _noul(
@@ -331,6 +352,12 @@ def gate_questions(evidence: dict[str, Any]) -> dict[str, Question]:
             "The conversation is consistent with this entry or unrelated to it.",
         )
     return questions
+
+
+def asks_working_notes(evidence: dict[str, Any]) -> bool:
+    """Working notes serve the rest of this task after a compaction: only a local pass
+    with compaction blocks under review asks about them."""
+    return evidence["scope"] == "local" and bool(evidence.get("compaction_blocks"))
 
 
 def decide_gate(answers: dict[str, float], threshold: float) -> list[str]:

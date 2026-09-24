@@ -605,8 +605,10 @@ the store the pass writes first, alongside that store's refinement history.
 ```
 
 A review is two calls. The **gate** asks one yes/no question per kind of lesson
-(repeated failure, reusable tactic, delegation role, durable fact, user correction) and
-one per entry the pass could fix: is it contradicted by the conversation? That covers
+(repeated failure, reusable tactic, delegation role, durable fact, user correction, and,
+in a local pass a compaction started, working notes: state from the turns just
+summarized away that the rest of the task still needs) and one per entry the pass could
+fix: is it contradicted by the conversation? That covers
 entries of the store the pass writes and, in a local pass, read-only global or ancestor
 entries, which get a local override. Nothing at `threshold` declines after that one
 call. The **focus** call is asked only about the lessons that fired, stated as
