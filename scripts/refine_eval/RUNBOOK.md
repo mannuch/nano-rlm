@@ -99,9 +99,10 @@ Before going further, check:
 
 ## 5. Full run
 
-Every scenario, every arm, 3 repeats: 13 scenarios × 3 refining arms, plus the `none`
-control for the 3 scenarios with a probe, is 42 cases per repeat and 126 in total. Run
-it in `tmux` or under `nohup`:
+Every scenario, the default arms, 3 repeats: 13 scenarios × 2 refining arms (`force`,
+`typesafe`), plus the `none` control for the 3 scenarios with a probe, is 29 cases per
+repeat and 87 in total. Adding `force+focus` (`--arms none,force,force+focus,typesafe`)
+makes it 42 per repeat and 126 in total. Run it in `tmux` or under `nohup`:
 
 ```bash
 ulimit -n 4096
@@ -118,7 +119,7 @@ Options:
 | flag | default | meaning |
 |---|---|---|
 | `--scenarios` | all | comma-separated ids (see below) |
-| `--arms` | all | `none`, `force`, `force+focus`, `typesafe` |
+| `--arms` | `none,force,typesafe` | also `force+focus`, which runs on request (see "What to look for") |
 | `--repeats` | 1 | trajectories are stochastic even when steered; use 3 or more for numbers you act on |
 | `--concurrency` | 4 | cases in flight; each is an IPython kernel, plus children in `delegation_role` |
 | `--threshold` | 0.7 | the judge's gate/flag threshold (`veto_threshold` 0.8 and `home_confidence` 0.6 stay at their defaults) |
@@ -184,9 +185,17 @@ What to look for:
 - **Does the planner decline on its own?** In `force`, compare the "declined by planner"
   count on negatives with `typesafe`. This is the open question from merging the review
   into the plan.
-- **Does the focus help?** Compare `force+focus` with `force` on edit checks: the right
-  kind, the stale entry updated rather than duplicated, and read-only entries overridden
-  locally.
+- **Does the focus help?** `focus` without `review` is there for hosts that want to
+  force a refinement but still get the judge's targeting: which kind of entry, which
+  entries to update or override, and evidence quotes. Measure it with the
+  `force+focus` arm against `force` on edit checks: the right kind, the stale entry
+  updated rather than duplicated, and read-only entries overridden locally. In runs 3
+  and 4 it showed no measurable effect with the current planner. Both arms were at or
+  near 1.0 on edit checks, because the planner already targets well unaided. On
+  negative scenarios the gate found nothing to focus on, so the planner got no
+  instructions and the arm behaved like `force`. It is therefore off by default. Rerun
+  it when the planner model or prompt changes, since a weaker planner is where
+  targeting should pay off.
 - **Does scope work?** Look at the three scope families: a stale global entry fixed by a
   global pass, a contradicted global entry overridden by a local pass, and a
   session-only fact declined by a global pass.

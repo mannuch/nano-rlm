@@ -48,6 +48,9 @@ ARMS: dict[str, dict[str, Any] | None] = {
 }
 """Host refine requests. In every refining arm the planner may still decline with no
 edits; ``typesafe`` lets the judge decline first. ``none`` is a probe control."""
+DEFAULT_ARMS = ("none", "force", "typesafe")
+"""``force+focus`` (a forced refinement with the judge's targeting) runs on request:
+it measured no different from ``force`` on edit quality with the current planner."""
 SWEEP = [round(0.3 + 0.1 * i, 2) for i in range(7)]
 
 
@@ -390,8 +393,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--arms",
-        default=",".join(ARMS),
-        help=f"Comma-separated arms: {', '.join(ARMS)}",
+        default=",".join(DEFAULT_ARMS),
+        help=f"Comma-separated arms: {', '.join(ARMS)} (default: "
+        f"{', '.join(DEFAULT_ARMS)})",
     )
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=4)
