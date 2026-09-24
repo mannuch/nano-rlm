@@ -91,7 +91,32 @@ one trace per task. `--resume <output-dir>` re-runs missing or errored rollouts.
   `mode: "shadow"`, `gate_decision` and per-call `usage`. TypeSafe input tokens stay well
   under 32k per call.
 
-## Reading the results
+## Reward comparison
+
+Three configs run the same tasks and differ only in nano-rlm's `harness` table:
+
+| config | refinement |
+|---|---|
+| `configs/ab_off.toml` | auto-refinement off (the baseline) |
+| `configs/ab_planner.toml` | auto-refinement on; the planner (task model) decides every pass |
+| `configs/ab_gate.toml` | auto-refinement on; the TypeSafe judge gates every pass first |
+
+```bash
+uv run vf-eval @ configs/ab_off.toml
+uv run vf-eval @ configs/ab_planner.toml
+uv run vf-eval @ configs/ab_gate.toml
+```
+
+Each config runs 100 tasks with 3 rollouts per task. Compare pass rates per task across the
+arms (paired by task), not only in aggregate. Tasks differ far more from one another than
+the arms are likely to.
+
+The comparison uses `deepseek/deepseek-v4.1-flash`. On Prime Inference,
+`deepseek/deepseek-v4-flash` ignores `tool_choice="none"`, so compaction and
+refinement calls came back as tool calls: 184 of 610 in the shadow run, stopping 9 of
+100 rollouts with `compaction_failed`. nano-rlm then drops tool schemas from side calls,
+but the model still emits tool calls from the history about a third of the time.
+
 
 All counts are per trace; sum or average them across `traces.jsonl`.
 
