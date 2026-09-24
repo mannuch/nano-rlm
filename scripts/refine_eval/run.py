@@ -81,9 +81,10 @@ def _config(settings: Settings, global_dir: Path) -> RuntimeConfig:
 
 
 REPO = Path(__file__).resolve().parents[2]
-_REPO_PATH = re.compile(re.escape(str(REPO)) + r"(?!/\.venv|/src/rlm)")
-"""This checkout, minus the runtime's own install (the kernel's venv and the rlm
-package), which tool output may name without the agent looking around."""
+_REPO_PATH = re.compile(re.escape(str(REPO)) + r"(?!/\.venv|/src\b)")
+"""This checkout, minus the runtime's own install: the kernel's venv, and ``src``,
+which the editable rlm install puts on the kernel's ``sys.path``. Tool output names
+those without the agent looking around."""
 
 
 def touched_repo(records: list[dict]) -> bool:

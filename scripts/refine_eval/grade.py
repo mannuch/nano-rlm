@@ -119,6 +119,32 @@ def lesson_entries(
     ]
 
 
+def after_agent(
+    scenario: Scenario, before: dict[str, list[dict]], edits: list[dict], applied: bool
+) -> str:
+    """What a pass did about a lesson the agent had already recorded."""
+    if not applied:
+        return "declined"
+    held = {
+        (scope, entry["kind"])
+        for scope in visible_scopes(scenario)
+        for entry in before.get(scope, [])
+        if entry.get("source") != "eval"
+        and matches(scenario.lesson, entry.get("title"), entry.get("content"))
+    }
+    created = {
+        (edit["scope"], edit["kind"])
+        for edit in edits
+        if edit["action"] == "create"
+        and matches(scenario.lesson, edit.get("title"), edit.get("content"))
+    }
+    if created & held:
+        return "duplicated"
+    if {scope for scope, _ in created} - {scope for scope, _ in held}:
+        return "overrode"
+    return "applied"
+
+
 def lesson_in(
     scenario: Scenario, stores: dict[str, list[dict]], *, agent_only: bool = False
 ) -> bool:
@@ -188,9 +214,11 @@ def grade_case(
     session sees), declining and folding more into the agent's entry are both fine,
     so the case has no expected decision (``expect_refine`` None, the scenario's own
     label kept as ``label_refine``). ``after_agent`` says what the pass did instead:
-    ``declined``, ``applied`` or ``duplicated`` (the lesson ended up in more entries
-    than before). Checks that credit the pass are skipped, and the lesson's signals
-    are the ones the veto should drop. "lesson recorded" checks the outcome
+    ``declined``; ``duplicated`` (it created an entry of the same kind, in the same
+    store, recording the lesson the agent's entry records); ``overrode`` (it recorded
+    the lesson in the other store, as a local pass does when the agent wrote it to
+    the global store); or ``applied``. Checks that credit the pass are skipped, and
+    the lesson's signals are the ones the veto should drop. "lesson recorded" checks the outcome
     whoever wrote it, in any store the session sees."""
     passes = [
         r
@@ -247,12 +275,7 @@ def grade_case(
     if arm in REFINING_ARMS:
         row["decision"] = bool(last and last["type"] == "refinement")
         if first:
-            grew = len(lesson_entries(scenario, final)) > len(
-                lesson_entries(scenario, before)
-            )
-            row["after_agent"] = (
-                "duplicated" if grew else "applied" if row["decision"] else "declined"
-            )
+            row["after_agent"] = after_agent(scenario, before, edits, row["decision"])
     judge = last and last.get("judge")
     if judge and "error" not in judge:
         captured = (
@@ -323,10 +346,11 @@ def outcome_table(rows: list[dict]) -> list[str]:
 def agent_first_table(rows: list[dict]) -> list[str]:
     """Per arm, for cases where the agent recorded the lesson itself before the pass:
     whether the pass declined, applied edits without adding a copy of the lesson, or
-    duplicated it (the only real failure here)."""
+    duplicated it (the only real failure here). ``overrode`` records the lesson in the
+    other store, as a local pass does when the agent put it in the global store."""
     lines = [
-        "| arm | cases | declined | applied without a duplicate | duplicated |",
-        "|---|---|---|---|---|",
+        "| arm | cases | declined | applied | overrode in the other store | duplicated |",
+        "|---|---|---|---|---|---|",
     ]
     for arm in REFINING_ARMS:
         outcomes = [
@@ -335,7 +359,10 @@ def agent_first_table(rows: list[dict]) -> list[str]:
             if r["arm"] == arm and r.get("after_agent")
         ]
         if outcomes:
-            counts = [outcomes.count(o) for o in ("declined", "applied", "duplicated")]
+            counts = [
+                outcomes.count(o)
+                for o in ("declined", "applied", "overrode", "duplicated")
+            ]
             lines.append(
                 f"| {arm} | {len(outcomes)} | " + " | ".join(map(str, counts)) + " |"
             )

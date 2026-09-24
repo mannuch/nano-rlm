@@ -168,6 +168,7 @@ def test_a_lesson_the_agent_recorded_first_is_graded_as_a_decline():
         [],
     )
     saved = {
+        "kind": "memory",
         "title": "Line counting",
         "content": "line counts never include blank lines",
         "source": "agent",
@@ -185,27 +186,22 @@ def test_a_lesson_the_agent_recorded_first_is_graded_as_a_decline():
         assert row["judge"]["lesson_turn_hit"] is None
     rendered = report([row], [0.7])
     assert "In 1, the agent recorded the lesson itself" in rendered
-    assert "| typesafe | 1 | 1 | 0 | 0 |" in rendered
+    assert "| typesafe | 1 | 1 | 0 | 0 | 0 |" in rendered
     assert "| typesafe | nan" not in rendered  # no expected decision to score
 
-    copied = {"title": "Line counts", "content": "exclude blank lines"}
-    applied = _ledger(
-        scenario.steer, {}, [_edit("create", "memory", "line-counts", "blank")]
-    )
-    duplicated = grade_case(
-        scenario,
-        "force",
-        applied,
-        {"local": [saved]},
-        {"local": [saved, copied]},
-        None,
-        0.7,
-    )
-    assert duplicated["after_agent"] == "duplicated"
-    merged = grade_case(
-        scenario, "force", applied, {"local": [saved]}, {"local": [saved]}, None, 0.7
-    )
-    assert merged["after_agent"] == "applied"
+    def after(before, *edits):
+        ledger = _ledger(scenario.steer, {}, list(edits))
+        return grade_case(scenario, "force", ledger, before, {}, None, 0.7)[
+            "after_agent"
+        ]
+
+    copy = _edit("create", "memory", "line-counts", "exclude blank lines")
+    assert after({"local": [saved]}, copy) == "duplicated"
+    assert after({"global": [saved]}, copy) == "overrode"
+    note = _edit("create", "prompt", "verify", "check blank lines first")
+    assert after({"local": [saved]}, note) == "applied"
+    merge = _edit("update", "memory", "line_counting", "blank lines never count")
+    assert after({"local": [saved]}, merge) == "applied"
 
     seeded = {**saved, "source": "eval"}
     assert not grade_case(
@@ -227,6 +223,7 @@ def test_touched_repo_ignores_the_runtime_install():
     assert touched_repo([tool(f"cat {REPO}/AGENTS.md")])
     assert not touched_repo([tool(f"File {REPO}/.venv/lib/python3.14/x.py")])
     assert not touched_repo([tool(f"{REPO}/src/rlm/engine.py")])
+    assert not touched_repo([tool(f"sys.path: ['{REPO}/src', '/usr/lib']")])
     assert not touched_repo([{"type": "context_window", "path": f"{REPO}/README.md"}])
 
 
