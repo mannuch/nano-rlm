@@ -111,11 +111,11 @@ Each config runs 100 tasks with 3 rollouts per task. Compare pass rates per task
 arms (paired by task), not only in aggregate. Tasks differ far more from one another than
 the arms are likely to.
 
-The comparison uses `deepseek/deepseek-v4.1-flash`. On Prime Inference,
-`deepseek/deepseek-v4-flash` ignores `tool_choice="none"`, so compaction and
-refinement calls came back as tool calls: 184 of 610 in the shadow run, stopping 9 of
-100 rollouts with `compaction_failed`. nano-rlm then drops tool schemas from side calls,
-but the model still emits tool calls from the history about a third of the time.
+Every config uses `deepseek/deepseek-v4.1-flash`. Don't use
+`deepseek/deepseek-v4-flash` here. On Prime Inference it ignores `tool_choice="none"`,
+which nano-rlm's compaction and refinement calls rely on. In the first shadow run, 184
+of 610 of those calls came back as tool calls, and 9 of 100 rollouts stopped with
+`compaction_failed`.
 
 
 All counts are per trace; sum or average them across `traces.jsonl`.

@@ -2,7 +2,7 @@
 # judge in shadow mode: the planner decides, the judge's verdict is only recorded.
 #
 #   uv run vf-eval @ configs/shadow.toml
-model = "deepseek/deepseek-v4-flash"
+model = "deepseek/deepseek-v4.1-flash"
 num_rollouts = 1
 
 [env.taskset]
@@ -10,7 +10,7 @@ id = "rlm-refine"
 
 [env.agent.harness]
 id = "rlm-refine"
-version = "5ec15d8d0ba32a97909a2df6a855a161086afb42"
+version = "4dacd2b1de2765ea775255d6712464234da06790"
 forward_env = ["TYPESAFE_API_KEY"]
 
 [env.agent.harness.policy]
