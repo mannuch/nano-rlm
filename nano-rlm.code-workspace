@@ -1,0 +1,18 @@
+// Opens nano-rlm and its verifiers eval harness as two workspace folders.
+//
+// evals/rlm_refine is a uv project of its own, with its own .venv: the verifiers commit
+// it needs pins mcp 2.0, which nano-rlm's mcp<2 pin can't share an environment with.
+// The ty language server resolves imports against one project's environment per
+// workspace folder and doesn't discover nested projects (astral-sh/ty#2410), so with
+// only the repo root open, verifiers and openthoughts_tblite show as unresolved.
+// Giving evals/rlm_refine its own folder lets ty check it against evals/rlm_refine/.venv
+// (see [tool.ty.environment] in its pyproject.toml); the root project excludes evals/.
+//
+// Open this file with File > Open Workspace from File, then restart the ty server.
+// Run `uv sync --python 3.12` in evals/rlm_refine first so its .venv exists.
+{
+  "folders": [
+    { "path": "." },
+    { "name": "rlm-refine", "path": "evals/rlm_refine" }
+  ]
+}
