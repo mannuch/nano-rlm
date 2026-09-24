@@ -448,10 +448,12 @@ def report(rows: list[dict], thresholds: list[float]) -> str:
     )
     first = sum(bool(r.get("agent_recorded_first")) for r in ok)
     leaked = sum(bool(r.get("touched_repo")) for r in rows)
+    changed = sum(bool(r.get("venv_changed")) for r in rows)
     return (
         f"# Refinement eval\n\n{len(rows)} cases, {len(rows) - len(ok)} errored or "
         f"failed. In {first}, the agent recorded the lesson itself before the pass; "
         "they have no expected decision and are reported under Agent recorded first. "
-        f"{leaked} reached into this repository.\n\n"
+        f"{leaked} reached into this repository; in {changed}, the agent changed "
+        "the installed packages of its own case.\n\n"
         f"{body}\n"
     )

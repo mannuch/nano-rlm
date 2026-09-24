@@ -15,6 +15,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
+import sysconfig
 import tempfile
 import traceback
 from dataclasses import dataclass
@@ -80,7 +83,12 @@ def _config(settings: Settings, global_dir: Path) -> RuntimeConfig:
     )
 
 
-REPO = Path(__file__).resolve().parents[2]
+REPO_ENV = "RLM_REFINE_EVAL_REPO"
+REPO = Path(os.environ.get(REPO_ENV) or Path(__file__).resolve().parents[2])
+"""This checkout. An isolated run executes a copy of these scripts, so the parent
+names the checkout through ``REPO_ENV``."""
+SITE_PACKAGES = Path(sysconfig.get_paths()["purelib"])
+"""The kernel's installed packages: kernels run on this process's interpreter."""
 _REPO_PATH = re.compile(re.escape(str(REPO)) + r"(?!/\.venv|/src\b)")
 """This checkout, minus the runtime's own install: the kernel's venv, and ``src``,
 which the editable rlm install puts on the kernel's ``sys.path``. Tool output names
@@ -94,6 +102,16 @@ def touched_repo(records: list[dict]) -> bool:
         _REPO_PATH.search(json.dumps(record, default=str))
         for record in records
         if record.get("type") in ("assistant", "tool_result")
+    )
+
+
+def venv_fingerprint() -> list[tuple[str, int]]:
+    """The kernel interpreter's top-level installed packages and ``.pth`` files with
+    their mtimes: an install, an uninstall or a ``.pth`` edit changes it."""
+    return sorted(
+        (path.name, path.stat().st_mtime_ns)
+        for path in SITE_PACKAGES.iterdir()
+        if path.name != "__pycache__"
     )
 
 
@@ -144,6 +162,7 @@ async def run_case(
             seed.kind, seed.title, seed.content, id=seed.id, source="eval"
         )
     config = _config(settings, global_dir)
+    packages = venv_fingerprint()
 
     engine: RLMEngine | None = None
     before: dict[str, list[dict]] = {}
@@ -216,9 +235,107 @@ async def run_case(
         session_dir=str(session_dir),
         tokens=tokens,
         touched_repo=touched_repo(records + probe_records),
+        venv_changed=venv_fingerprint() != packages,
         error="\n".join(errors) or None,
     )
     return row
+
+
+def isolated_env(environ: dict[str, str], venv: Path) -> dict[str, str]:
+    """The environment for a case running from ``venv``: kernels inherit ``PATH``
+    and ``VIRTUAL_ENV``, so both point at the case's venv and nothing in this
+    checkout stays on ``PATH``."""
+    path = [
+        entry
+        for entry in environ.get("PATH", "").split(os.pathsep)
+        if entry and not Path(os.path.realpath(entry)).is_relative_to(REPO)
+    ]
+    return {
+        **environ,
+        "VIRTUAL_ENV": str(venv),
+        "PATH": os.pathsep.join([str(venv / "bin"), *path]),
+        REPO_ENV: str(REPO),
+    }
+
+
+def make_venv(venv: Path) -> None:
+    """A fresh venv with rlm installed as a regular package (not an editable link
+    into this checkout); uv's cache makes this a few seconds."""
+    python = venv / "bin" / "python"
+    subprocess.run(
+        ["uv", "venv", "-q", "--python", sys.executable, str(venv)], check=True
+    )
+    subprocess.run(
+        ["uv", "pip", "install", "-q", "--compile-bytecode"]
+        + ["--python", str(python), str(REPO)],
+        check=True,
+    )
+
+
+def child_args(settings: Settings) -> list[str]:
+    args = [
+        "--model",
+        settings.model,
+        "--threshold",
+        str(settings.threshold),
+        "--timeout",
+        str(settings.timeout_s),
+    ]
+    return args + (["--base-url", settings.base_url] if settings.base_url else [])
+
+
+async def run_case_isolated(
+    scenario: Scenario, arm: str, repeat: int, settings: Settings, cases: Path
+) -> dict[str, Any]:
+    """``run_case`` in a child process on a venv of the case's own, from the copy of
+    these scripts in ``cases``. Kernels run on the driver's interpreter, so an agent
+    that installs a package changes only its own case; nothing the kernel can see
+    (interpreter, ``sys.path``, ``PATH``) points into this checkout. The venv is
+    removed afterwards."""
+    case = f"{scenario.id}.{arm}.{repeat}"
+    venv = cases / "venvs" / case
+    row_file = cases / "rows" / f"{case}.json"
+    try:
+        await asyncio.to_thread(make_venv, venv)
+        process = await asyncio.create_subprocess_exec(
+            str(venv / "bin" / "python"),
+            str(cases / "eval" / "run.py"),
+            "--case",
+            scenario.id,
+            arm,
+            str(repeat),
+            "--cases-dir",
+            str(cases),
+            "--row-file",
+            str(row_file),
+            *child_args(settings),
+            cwd=cases,
+            env=isolated_env(dict(os.environ), venv),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0 or not row_file.exists():
+            raise RuntimeError(
+                f"case process exited {process.returncode}: "
+                f"{stderr.decode(errors='replace')[-1500:]}"
+            )
+        return json.loads(row_file.read_text())
+    except Exception as exc:  # noqa: BLE001 - one failed case must not end the run
+        return {
+            "scenario": scenario.id,
+            "family": scenario.family,
+            "arm": arm,
+            "repeat": repeat,
+            "expect_refine": None,
+            "decision": None,
+            "declined_by": None,
+            "edit_checks": {},
+            "judge": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        shutil.rmtree(venv, ignore_errors=True)
 
 
 async def run_all(
@@ -229,13 +346,15 @@ async def run_all(
     root: Path,
     cases: Path,
     concurrency: int,
+    isolate: bool,
 ) -> list[dict[str, Any]]:
     gate = asyncio.Semaphore(concurrency)
     results = root / "results.jsonl"
+    runner = run_case_isolated if isolate else run_case
 
     async def one(scenario: Scenario, arm: str, repeat: int) -> dict[str, Any]:
         async with gate:
-            row = await run_case(scenario, arm, repeat, settings, cases)
+            row = await runner(scenario, arm, repeat, settings, cases)
         with results.open("a") as f:
             f.write(json.dumps(row, default=str) + "\n")
         status = "error" if row["error"] else f"decision={row['decision']}"
@@ -257,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", help="Task model; required unless --report-only")
     parser.add_argument("--base-url", default=os.environ.get("RLM_BASE_URL"))
-    parser.add_argument("--run-dir", required=True, help="results.jsonl and report.md")
+    parser.add_argument("--run-dir", help="results.jsonl and report.md (required)")
     parser.add_argument(
         "--cases-dir",
         help="Where each case's workspace, sessions and global store go. Default: a new "
@@ -281,13 +400,24 @@ def main(argv: list[str] | None = None) -> int:
         "--timeout", type=float, default=600.0, help="Seconds per prompt"
     )
     parser.add_argument(
+        "--no-isolate",
+        action="store_true",
+        help="Run every case in this process, on this interpreter, instead of in a "
+        "process and venv of its own (an agent's installs then reach later cases)",
+    )
+    # One isolated case in a child process: --case SCENARIO ARM REPEAT --row-file F.
+    parser.add_argument("--case", nargs=3, help=argparse.SUPPRESS)
+    parser.add_argument("--row-file", help=argparse.SUPPRESS)
+    parser.add_argument(
         "--report-only",
         action="store_true",
         help="Rebuild report.md from an existing results.jsonl",
     )
     args = parser.parse_args(argv)
 
-    root = Path(args.run_dir)
+    if not args.case and not args.run_dir:
+        parser.error("--run-dir is required")
+    root = Path(args.run_dir or ".")
     if args.report_only:
         rows = [json.loads(line) for line in (root / "results.jsonl").open()]
         (root / "report.md").write_text(report(rows, SWEEP))
@@ -302,23 +432,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("set RLM_API_KEY or OPENAI_API_KEY")
     if not typesafe_key:
         parser.error("set TYPESAFE_API_KEY")
-    ids = [i.strip() for i in args.scenarios.split(",") if i.strip()]
-    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
-    unknown = [i for i in ids if i not in BY_ID] + [a for a in arms if a not in ARMS]
-    if unknown:
-        parser.error(f"unknown scenarios or arms: {unknown}")
-    if root.exists() and any(root.iterdir()):
-        parser.error(f"{root} is not empty")
-    cases = Path(
-        args.cases_dir
-        or tempfile.mkdtemp(prefix=f"rlm-refine-eval-{root.resolve().name}-")
-    ).resolve()
-    if cases.is_relative_to(REPO):
-        parser.error(f"--cases-dir {cases} is inside this repository")
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "cases_dir.txt").write_text(f"{cases}\n")
-    print(f"cases: {cases}", flush=True)
-
     settings = Settings(
         model=args.model,
         api_key=api_key,
@@ -327,6 +440,46 @@ def main(argv: list[str] | None = None) -> int:
         threshold=args.threshold,
         timeout_s=args.timeout,
     )
+
+    if args.case:
+        scenario_id, arm, repeat = args.case
+        row = asyncio.run(
+            run_case(
+                BY_ID[scenario_id], arm, int(repeat), settings, Path(args.cases_dir)
+            )
+        )
+        row_file = Path(args.row_file)
+        row_file.parent.mkdir(parents=True, exist_ok=True)
+        row_file.write_text(json.dumps(row, default=str))
+        return 0
+
+    ids = [i.strip() for i in args.scenarios.split(",") if i.strip()]
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    unknown = [i for i in ids if i not in BY_ID] + [a for a in arms if a not in ARMS]
+    if unknown:
+        parser.error(f"unknown scenarios or arms: {unknown}")
+    if root.exists() and any(root.iterdir()):
+        parser.error(f"{root} is not empty")
+    isolate = not args.no_isolate
+    if isolate and shutil.which("uv") is None:
+        parser.error("isolating cases needs uv on PATH (or pass --no-isolate)")
+    cases = Path(
+        args.cases_dir
+        or tempfile.mkdtemp(prefix=f"rlm-refine-eval-{root.resolve().name}-")
+    ).resolve()
+    if cases.is_relative_to(REPO):
+        parser.error(f"--cases-dir {cases} is inside this repository")
+    cases.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "cases_dir.txt").write_text(f"{cases}\n")
+    print(f"cases: {cases}", flush=True)
+    if isolate:
+        shutil.copytree(
+            Path(__file__).parent,
+            cases / "eval",
+            ignore=shutil.ignore_patterns("__pycache__", "runs", "*.md"),
+        )
+
     rows = asyncio.run(
         run_all(
             [BY_ID[i] for i in ids],
@@ -336,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
             root,
             cases,
             args.concurrency,
+            isolate,
         )
     )
     (root / "report.md").write_text(report(rows, SWEEP))

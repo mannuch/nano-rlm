@@ -4,6 +4,7 @@ the report. No sessions, no network."""
 from __future__ import annotations
 
 import json
+import os
 
 import sys
 from pathlib import Path
@@ -322,3 +323,16 @@ async def test_run_case_probes_in_a_fresh_session_that_starts_from_the_harness(
     probe = client.calls[3]["messages"]
     assert not any(scenario.steer[1] in str(m.get("content")) for m in probe)
     assert "line counts exclude blank lines" in probe[0]["content"]
+
+
+def test_an_isolated_case_sees_its_own_venv_and_nothing_in_this_checkout(tmp_path):
+    from run import REPO, REPO_ENV, isolated_env
+
+    venv = tmp_path / "venvs" / "case"
+    env = isolated_env(
+        {"PATH": os.pathsep.join([f"{REPO}/.venv/bin", "/usr/bin"]), "HOME": "/h"},
+        venv,
+    )
+    assert env["VIRTUAL_ENV"] == str(venv)
+    assert env["PATH"].split(os.pathsep) == [str(venv / "bin"), "/usr/bin"]
+    assert env[REPO_ENV] == str(REPO) and env["HOME"] == "/h"

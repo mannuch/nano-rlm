@@ -18,13 +18,32 @@ Each case is one live session:
 6. The case is graded from the session ledger, the pre-pass snapshot and the final
    state of both stores.
 
-Case directories (workspaces, sessions, global stores) live outside this repository, by
-default in a new directory under the system temp dir. Inside the checkout, agents
-found nano-rlm's own `AGENTS.md` and `pyproject.toml` by looking around, which
-contaminated what they learned. Every row records `touched_repo`, true when the
-agent's code or tool output mentions this checkout (other than the runtime's own venv
-and package). The report header counts them. If that count stays at zero, no sandbox is
-needed.
+### Isolation
+
+Cases must not affect each other or see this checkout. Earlier runs showed both
+problems: agents found nano-rlm's own `AGENTS.md` and `pyproject.toml`, and one agent
+installed its fixture project into the interpreter every later case shared (this
+repo's `.venv`). So:
+
+- **Case directories live outside the repository.** Workspaces, sessions and global
+  stores go to a new directory under the system temp dir. `--cases-dir` chooses
+  another place; a path inside this repository is refused.
+- **Each case runs in a process and venv of its own.** Kernels run on the driver's
+  interpreter. For each case the driver creates a fresh venv in the cases directory,
+  with rlm installed as a regular package rather than a link into this checkout
+  (a few seconds each, from uv's cache). It then runs the case in a child process, from
+  a copy of these scripts. An agent's installs affect only its own case, and neither
+  the interpreter, `sys.path` nor `PATH` points into the checkout. The venv is deleted
+  when the case ends. `--no-isolate` runs every case in one process on the current
+  interpreter instead, for debugging.
+- **Two flags per row.** `touched_repo` is true when the agent's code or tool output
+  mentions this checkout. `venv_changed` is true when the agent changed its own
+  case's installed packages; that no longer reaches other cases, but it explains
+  unusual results. The report header counts both.
+
+This is not a security boundary. Cases still share your user account, home directory
+and network, and a deliberate agent can still browse the filesystem. If
+`touched_repo` stays above zero, run each case in a container.
 
 ## 1. Sync
 
@@ -33,7 +52,9 @@ git pull
 uv sync
 ```
 
-`typesafe-sdk` is a regular dependency, so there is no extra group.
+`typesafe-sdk` is a regular dependency, so there is no extra group. `uv sync` also
+removes anything an agent installed into this repo's `.venv` during an earlier,
+unisolated run. `uv` must be on `PATH`: the driver uses it to build each case's venv.
 
 ## 2. Check the pieces offline
 
