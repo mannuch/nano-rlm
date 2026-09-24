@@ -45,6 +45,10 @@ gepa = [
     "gepa>=0.1.4,<0.2",
 ]
 
+[tool.ty.src]
+# evals/rlm_refine is its own uv project, type-checked against its own environment.
+exclude = ["evals/"]
+
 [tool.ruff]
 extend-exclude = ["scripts/gepa/workspace"]
 

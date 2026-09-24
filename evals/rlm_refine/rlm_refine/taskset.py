@@ -18,14 +18,19 @@ class RlmRefineConfig(OpenThoughtsTBLiteConfig):
     is called from inside the sandbox."""
 
 
-class RlmRefineTaskset(
-    OpenThoughtsTBLiteTaskset, vf.Taskset[HarborTask, RlmRefineConfig]
+# verifiers finds the config type from this base; ty rejects re-parameterizing a
+# generic base, as it does for OpenThoughtsTBLiteTaskset itself.
+class RlmRefineTaskset(  # ty: ignore[invalid-generic-class]
+    OpenThoughtsTBLiteTaskset,
+    vf.Taskset[HarborTask, RlmRefineConfig],  # ty: ignore[invalid-type-arguments]
 ):
     """OpenThoughts TBLite, unchanged except that network-restricted tasks may also
     reach `allow_hosts`. A runtime allowlist can't do this: verifiers intersects it
     with the task's own policy, and an offline task stays offline. At the pinned
     prime-envs commit every task is public, so this changes nothing until TBLite's
     tasks are made offline."""
+
+    config: RlmRefineConfig
 
     def load(self) -> Iterator[HarborTask]:
         widened = 0

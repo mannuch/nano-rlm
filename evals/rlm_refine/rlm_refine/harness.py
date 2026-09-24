@@ -102,7 +102,7 @@ class RlmRefineHarness(vf.ACPHarness[RlmRefineHarnessConfig]):
             if text
         ]
         harness = self.config.harness
-        if self._judged():
+        if harness and harness.get("refine_judge"):
             judge = {
                 **harness["refine_judge"],
                 "api_key": self.config.resolved_env[TYPESAFE_API_KEY],
