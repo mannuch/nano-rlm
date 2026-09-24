@@ -10,7 +10,7 @@ id = "rlm-refine"
 
 [env.agent.harness]
 id = "rlm-refine"
-version = "0c8acf1ecd0703ff15504db468fb211ce84f7ff7"
+version = "5ec15d8d0ba32a97909a2df6a855a161086afb42"
 forward_env = ["TYPESAFE_API_KEY"]
 
 [env.agent.harness.policy]
