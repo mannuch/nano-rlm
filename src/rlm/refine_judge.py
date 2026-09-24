@@ -3,13 +3,15 @@
 A review is two ``system_one`` calls over a compact evidence state built in code (the
 whole conversation does not fit Jev's 32k-token state budget):
 
-1. gate: one yes/no signal per kind of evidence a refinement should act on. Signals at
-   or above the threshold become the lessons of the review; none fired declines it.
+1. gate: one yes/no signal per kind of lesson a refinement should act on, plus one
+   per harness entry the pass could fix: is it contradicted by the conversation? (An
+   entry of the store the pass writes is updated or deleted; in a local pass, a
+   read-only global or ancestor entry is overridden locally.) Anything at or above
+   the threshold fires; nothing firing declines the review.
 2. focus: asked only about the lessons that fired, stated as premises in the state.
    Per lesson: is it already recorded (a veto) and which harness kind should hold it.
-   Per entry of the store the pass writes: does it cover a lesson, and is it
-   contradicted; in a local pass, per read-only entry: is it contradicted, so a local
-   entry should override it. Per turn: is it direct evidence for a lesson.
+   Per entry of the store the pass writes: does it cover a lesson. Per turn: is it
+   direct evidence for a lesson.
 
 Questions are worded for the pass's scope: a local pass serves later tasks in this
 session, a global pass future sessions.
@@ -58,6 +60,7 @@ LESSON_SIGNALS = (
     "user_correction",
 )
 CONTRADICTED = "harness_contradicted"
+"""Fired when any entry's ``wrong_<k>`` gate question fires."""
 GATE_SIGNALS = (*LESSON_SIGNALS, CONTRADICTED)
 
 HORIZONS = {
@@ -117,14 +120,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
         "it should follow.",
         "User messages only ask questions or give new tasks.",
     ),
-    CONTRADICTED: (
-        "Does anything in `turns` contradict an entry in `harness_entries`, or show that "
-        "an entry is outdated or wrong?",
-        "The conversation shows an entry's fact, rule or procedure no longer holds.",
-        "Every entry is consistent with the conversation, or unrelated to it.",
-    ),
 }
-"""Gate signal -> ``(instructions, true, false)``: the Noul's question, then the
+"""Lesson signal -> ``(instructions, true, false)``: the Noul's question, then the
 ``NoulCriteria`` descriptions of its yes and no outcomes. ``{horizon}`` is filled
 from ``HORIZONS``."""
 
@@ -302,18 +299,29 @@ def gate_questions(evidence: dict[str, Any]) -> dict[str, Question]:
     """Call 1: one Noul per gate signal. The contradiction check is asked only when
     there are entries to contradict."""
     horizon = HORIZONS[evidence["scope"]]
-    return {
+    questions: dict[str, Question] = {
         signal: _noul(
             *(text.format(horizon=horizon) for text in _GATE_QUESTIONS[signal])
         )
-        for signal in GATE_SIGNALS
-        if signal != CONTRADICTED or evidence["harness_entries"]
+        for signal in LESSON_SIGNALS
     }
+    for k, _ in _contradictable(evidence):
+        questions[f"wrong_{k}"] = _noul(
+            f"Do the messages in `turns` contradict `harness_entries[{k}]` or show "
+            "that it is outdated?",
+            "The conversation shows this entry's fact, rule or procedure no longer "
+            "holds.",
+            "The conversation is consistent with this entry or unrelated to it.",
+        )
+    return questions
 
 
 def decide_gate(answers: dict[str, float], threshold: float) -> list[str]:
     """The fired signals, in ``GATE_SIGNALS`` order."""
-    return [s for s in GATE_SIGNALS if answers.get(s, 0.0) >= threshold]
+    fired = [s for s in LESSON_SIGNALS if answers.get(s, 0.0) >= threshold]
+    if any(p >= threshold for k, p in answers.items() if k.startswith("wrong_")):
+        fired.append(CONTRADICTED)
+    return fired
 
 
 def focus_state(evidence: dict[str, Any], fired: list[str]) -> dict[str, Any]:
@@ -358,6 +366,12 @@ def _overridable(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
     ][: max(0, room)]
 
 
+def _contradictable(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
+    """The entries whose contradiction the gate asks about: those the pass can edit,
+    then those a local pass can override."""
+    return [*_editable(evidence), *_overridable(evidence)]
+
+
 def _turn_slots(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
     turns = list(enumerate(evidence["turns"]))
     return turns[-MAX_TURN_QUESTIONS:]
@@ -365,8 +379,9 @@ def _turn_slots(evidence: dict[str, Any]) -> list[tuple[int, dict]]:
 
 def focus_questions(state: dict[str, Any], fired: list[str]) -> dict[str, Question]:
     """Call 2, built only for what fired. Question ids are code-side keys:
-    ``captured_<signal>``, ``home_<signal>``, ``covers_<k>``, ``wrong_<k>`` (index into
-    ``harness_entries``) and ``turn_<j>`` (index into ``turns``)."""
+    ``captured_<signal>``, ``home_<signal>``, ``covers_<k>`` (index into
+    ``harness_entries``) and ``turn_<j>`` (index into ``turns``). The gate's
+    ``wrong_<k>`` questions use the same entry index."""
     lessons = [s for s in fired if s in LESSONS]
     questions: dict[str, Question] = {}
     for i, signal in enumerate(lessons):
@@ -383,23 +398,13 @@ def focus_questions(state: dict[str, Any], fired: list[str]) -> dict[str, Questi
             f"{HORIZONS[state['scope']]} benefit? Pick the smallest component that fits.",
             criteria=HOME_KINDS,
         )
-    editable = _editable(state)
-    for k, _ in editable if lessons else []:
+    for k, _ in _editable(state) if lessons else []:
         questions[f"covers_{k}"] = _noul(
             f"Is `harness_entries[{k}]` about the same topic as a lesson listed in "
             "`gate.fired`, as it appears in `turns`?",
             "The entry addresses the same fact, rule, procedure or role, so the "
             "lesson belongs in it.",
             "The entry is about something else.",
-        )
-    contradicted = [*editable, *_overridable(state)] if CONTRADICTED in fired else []
-    for k, _ in contradicted:
-        questions[f"wrong_{k}"] = _noul(
-            f"Do the messages in `turns` contradict `harness_entries[{k}]` or show "
-            "that it is outdated?",
-            "The conversation shows this entry's fact, rule or procedure no longer "
-            "holds.",
-            "The conversation is consistent with this entry or unrelated to it.",
         )
     if lessons:
         for j, _ in _turn_slots(state):
@@ -423,7 +428,8 @@ def decide_focus(
     evidence: dict[str, Any],
     config: RefineJudgeConfig,
 ) -> tuple[bool, str, str | None, list[int]]:
-    """``(gate_decision, rationale, instructions, evidence_turn_indices)`` from call 2.
+    """``(gate_decision, rationale, instructions, evidence_turn_indices)`` from both
+    calls' Noul answers (``nouls`` holds the gate's ``wrong_<k>`` and call 2's).
 
     A lesson recorded already is dropped; with no lesson left and no contradicted
     entry the judge declines. Instructions name each lesson's home kind (one kind when
@@ -558,21 +564,26 @@ class RefineJudge:
             )
 
         state = focus_state(evidence, fired)
-        response = await self._client.system_one(
-            state, focus_questions(state, fired), model=config.model
-        )
-        usage["focus"] = _usage(response)
-        nouls = {k: a.noul for k, a in response.nouls.items()}
-        choices = {
-            k: {
-                "choice": a.choice,
-                "confidence": a.confidence,
-                "probabilities": dict(a.probabilities),
+        questions = focus_questions(state, fired)
+        nouls: dict[str, float] = {}
+        choices: dict[str, dict[str, Any]] = {}
+        # A contradicted entry with no lesson has nothing left to ask.
+        if questions:
+            response = await self._client.system_one(
+                state, questions, model=config.model
+            )
+            usage["focus"] = _usage(response)
+            nouls = {k: a.noul for k, a in response.nouls.items()}
+            choices = {
+                k: {
+                    "choice": a.choice,
+                    "confidence": a.confidence,
+                    "probabilities": dict(a.probabilities),
+                }
+                for k, a in response.choices.items()
             }
-            for k, a in response.choices.items()
-        }
         decision, rationale, instructions, turns = decide_focus(
-            fired, nouls, choices, evidence, config
+            fired, {**gate, **nouls}, choices, evidence, config
         )
         return JudgeVerdict(
             should_refine=force or decision,

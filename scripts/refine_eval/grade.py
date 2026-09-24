@@ -4,7 +4,6 @@ aggregate the rows into a report. Pure functions: no model or network calls."""
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from collections import defaultdict
 from statistics import mean
 from typing import Any
@@ -98,16 +97,22 @@ def _top(choice: dict[str, Any]) -> str:
     return max(choice["probabilities"], key=choice["probabilities"].get)
 
 
-def recorded_before(
-    scenario: Scenario, final: dict[str, list[dict]], when: float
+def visible_scopes(scenario: Scenario) -> tuple[str, ...]:
+    """The stores a session sees for a scenario's pass: a local session also sees
+    the global store."""
+    return ("local", "global") if scenario.scope == "local" else ("global",)
+
+
+def lesson_in(
+    scenario: Scenario, stores: dict[str, list[dict]], *, agent_only: bool = False
 ) -> bool:
-    """Whether the agent recorded the scenario's lesson itself before ``when`` (the
-    pass's ledger timestamp): an entry it wrote in the store the pass targets."""
+    """Whether an entry in a visible store records the scenario's lesson;
+    ``agent_only`` leaves out entries the eval seeded."""
     return scenario.lesson is not None and any(
-        entry.get("source") == "agent"
-        and datetime.fromisoformat(entry["updated_at"]).timestamp() < when
-        and matches(scenario.lesson, entry.get("title"), entry.get("content"))
-        for entry in final.get(scenario.scope, [])
+        matches(scenario.lesson, entry.get("title"), entry.get("content"))
+        and not (agent_only and entry.get("source") == "eval")
+        for scope in visible_scopes(scenario)
+        for entry in stores.get(scope, [])
     )
 
 
@@ -139,10 +144,12 @@ def judge_scores(
         "captured_hit": None,
         "lesson_turn_hit": None,
     }
-    if scenario.expect_entries and judge["focus"] is not None:
+    if scenario.expect_entries:
+        # wrong_<k> is asked in the gate call, covers_<k> in the focus call.
+        answers = {**judge["gate"], **focus}
         scores["entry_hit"] = mean(
             ref in entries
-            and focus.get(f"{label}_{entries.index(ref)}", 0.0) >= threshold
+            and answers.get(f"{label}_{entries.index(ref)}", 0.0) >= threshold
             for ref, label in scenario.expect_entries.items()
         )
     vetoable = [s for s in fired if s in captured]
@@ -159,19 +166,21 @@ def grade_case(
     scenario: Scenario,
     arm: str,
     records: list[dict],
+    before: dict[str, list[dict]],
     final: dict[str, list[dict]],
     probe_answer: str | None,
     threshold: float,
 ) -> dict[str, Any]:
-    """One results row. ``records`` is the session ledger, ``final`` each store's
-    entries after the run, by scope. A pass is applied (a ``refinement`` record) or not (a
+    """One results row. ``records`` is the session ledger; ``before`` and ``final``
+    are each store's entries, by scope, just before the pass and after the run. A pass is applied (a ``refinement`` record) or not (a
     ``refinement_declined`` record, whose ``reason`` says who declined).
 
-    When the agent recorded the lesson itself before the pass, the case is graded as
+    When the agent recorded the lesson itself before the pass (in any store the
+    session sees), the case is graded as
     a decline (``expect_refine`` False, the scenario's own label kept as
     ``label_refine``), checks that credit the pass are skipped, and the lesson's
     signals are the ones the veto should drop. "lesson recorded" checks the outcome
-    whoever wrote it."""
+    whoever wrote it, in any store the session sees."""
     passes = [
         r
         for r in records
@@ -191,17 +200,14 @@ def grade_case(
             None,
         )
     edits = applied_edits(records)
-    first = last is not None and recorded_before(scenario, final, last["timestamp"])
+    first = last is not None and lesson_in(scenario, before, agent_only=True)
     checks = {
         repr(check): check_edit(check, edits, final)
         for check in scenario.edit_checks
         if not (first and isinstance(check, (Created, Changed)))
     }
     if scenario.lesson is not None:
-        checks["lesson recorded"] = any(
-            matches(scenario.lesson, e.get("title"), e.get("content"))
-            for e in final.get(scenario.scope, [])
-        )
+        checks["lesson recorded"] = lesson_in(scenario, final)
     row: dict[str, Any] = {
         "scenario": scenario.id,
         "family": scenario.family,
@@ -368,9 +374,10 @@ def report(rows: list[dict], thresholds: list[float]) -> str:
         f"## {title}\n\n" + "\n".join(lines) for title, lines in sections
     )
     first = sum(bool(r.get("agent_recorded_first")) for r in ok)
+    leaked = sum(bool(r.get("touched_repo")) for r in rows)
     return (
         f"# Refinement eval\n\n{len(rows)} cases, {len(rows) - len(ok)} errored or "
         f"failed. In {first}, the agent recorded the lesson itself before the pass; "
-        "they are graded as declines.\n\n"
+        f"they are graded as declines. {leaked} reached into this repository.\n\n"
         f"{body}\n"
     )

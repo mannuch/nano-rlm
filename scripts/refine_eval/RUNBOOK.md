@@ -10,9 +10,21 @@ Each case is one live session:
 1. It runs in its own fixture workspace, with fresh local and global harness stores.
 2. Seeded entries are written into those stores.
 3. The scenario's steering prompts run as ordinary turns.
-4. The arm's host refinement is triggered (`ai.prime.rlm/refine-v1`, empty prompt).
-5. A probe question is optionally asked.
-6. The case is graded from the session ledger and the final state of both stores.
+4. Both stores are snapshotted, and the arm's host refinement is triggered
+   (`ai.prime.rlm/refine-v1`, empty prompt).
+5. For scenarios with a probe, the probe question runs in a **fresh session**, in the
+   same workspace. It starts from the post-pass local store and shares the global
+   store, so it cannot see the steering conversation, only what the harness carries.
+6. The case is graded from the session ledger, the pre-pass snapshot and the final
+   state of both stores.
+
+Case directories (workspaces, sessions, global stores) live outside this repository, by
+default in a new directory under the system temp dir. Inside the checkout, agents
+found nano-rlm's own `AGENTS.md` and `pyproject.toml` by looking around, which
+contaminated what they learned. Every row records `touched_repo`, true when the
+agent's code or tool output mentions this checkout (other than the runtime's own venv
+and package). The report header counts them. If that count stays at zero, no sandbox is
+needed.
 
 ## 1. Sync
 
@@ -101,9 +113,11 @@ Each case costs:
 
 If the log shows 429 retries, lower `--concurrency`.
 
-`--run-dir` must be new or empty. There is no resume: a stopped run keeps the rows it
-finished in `results.jsonl`, and `--report-only` (step 7) reports on them. Re-run the
-missing scenarios into a new directory.
+`--run-dir` must be new or empty; it holds `results.jsonl`, `report.md` and
+`cases_dir.txt`, which names where the cases went (also printed at start). Pass
+`--cases-dir` to choose that place; it is refused inside this repository. There is no
+resume: a stopped run keeps the rows it finished in `results.jsonl`, and `--report-only`
+(step 7) reports on them. Re-run the missing scenarios into a new directory.
 
 ## 6. Monitor
 
@@ -155,7 +169,7 @@ What to look for:
   counts, not from 0.7.
 
 To look at one case, find its row in `results.jsonl` (`session_dir` names the case
-`<scenario>.<arm>.<repeat>`). Then read:
+`<scenario>.<arm>.<repeat>`). Then read, under the cases directory:
 
 - `sessions/<case>/messages.jsonl`: the ledger. The last `refinement` or
   `refinement_declined` record with `trigger: "host"` is the pass under test. Its `judge`
@@ -163,6 +177,8 @@ To look at one case, find its row in `results.jsonl` (`session_dir` names the ca
   the planner instructions it wrote.
 - `sessions/<case>/harness/harness_state.json` and
   `global/<case>/harness_state.json`: the final local and global stores.
+- `sessions/<case>.probe/messages.jsonl`: the fresh probe session, for scenarios with
+  a probe.
 - `workspaces/<case>/`: the fixture files the session ran in.
 
 ## Scenarios
@@ -193,5 +209,6 @@ pair each positive with a nearby negative.
 
 ## Cleanup
 
-`scripts/refine_eval/runs/` is gitignored. Each case keeps its session, workspace and
-global store under the run directory; delete the directory once the run is reviewed.
+`scripts/refine_eval/runs/` is gitignored. Cases live in the directory named by
+`cases_dir.txt`; delete it once the run is reviewed. The system temp dir is cleaned by
+the OS eventually, so pass `--cases-dir` to keep cases longer.

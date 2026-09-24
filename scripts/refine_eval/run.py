@@ -13,6 +13,9 @@ import argparse
 import asyncio
 import json
 import os
+import re
+import shutil
+import tempfile
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,14 +80,59 @@ def _config(settings: Settings, global_dir: Path) -> RuntimeConfig:
     )
 
 
+REPO = Path(__file__).resolve().parents[2]
+_REPO_PATH = re.compile(re.escape(str(REPO)) + r"(?!/\.venv|/src/rlm)")
+"""This checkout, minus the runtime's own install (the kernel's venv and the rlm
+package), which tool output may name without the agent looking around."""
+
+
+def touched_repo(records: list[dict]) -> bool:
+    """Whether the agent's code or tool output reached into this checkout: case
+    directories live outside it, so a mention means the agent went looking."""
+    return any(
+        _REPO_PATH.search(json.dumps(record, default=str))
+        for record in records
+        if record.get("type") in ("assistant", "tool_result")
+    )
+
+
+def snapshot(stores: dict[str, HarnessStore]) -> dict[str, list[dict]]:
+    return {
+        scope: [e.model_dump() for e in store.list()] for scope, store in stores.items()
+    }
+
+
+def _usage(engine: RLMEngine | None) -> int:
+    if engine is None:
+        return 0
+    return engine._total_usage.prompt_tokens + engine._total_usage.completion_tokens
+
+
+async def _close(engine: RLMEngine | None) -> str | None:
+    if engine is None:
+        return None
+    try:
+        await engine.aclose()
+    except Exception as exc:  # noqa: BLE001 - keep the case's graded row
+        return f"close failed: {exc!r}"
+    return None
+
+
 async def run_case(
-    scenario: Scenario, arm: str, repeat: int, settings: Settings, root: Path
+    scenario: Scenario, arm: str, repeat: int, settings: Settings, cases: Path
 ) -> dict[str, Any]:
-    """One graded case; failures are recorded on the row, never raised."""
+    """One graded case; failures are recorded on the row, never raised.
+
+    The steering session is refined through the host path; the probe then runs in a
+    fresh session in the same workspace that starts from the post-pass local store
+    and shares the global store, so it measures what the harness carries rather than
+    what the conversation still holds.
+    """
     case = f"{scenario.id}.{arm}.{repeat}"
-    workspace = root / "workspaces" / case
-    session_dir = root / "sessions" / case
-    global_dir = root / "global" / case
+    workspace = cases / "workspaces" / case
+    session_dir = cases / "sessions" / case
+    probe_dir = cases / "sessions" / f"{case}.probe"
+    global_dir = cases / "global" / case
     scenario.build(workspace)
     stores = {
         "local": HarnessStore(local_dir(session_dir)),
@@ -94,18 +142,18 @@ async def run_case(
         stores[seed.scope].create(
             seed.kind, seed.title, seed.content, id=seed.id, source="eval"
         )
+    config = _config(settings, global_dir)
 
     engine: RLMEngine | None = None
-    probe_answer = None
-    error = None
+    before: dict[str, list[dict]] = {}
+    errors: list[str] = []
     try:
         engine = RLMEngine(
-            cwd=str(workspace),
-            session=Session(session_dir),
-            runtime_config=_config(settings, global_dir),
+            cwd=str(workspace), session=Session(session_dir), runtime_config=config
         )
         for text in scenario.steer:
             await asyncio.wait_for(engine.prompt(text), timeout=settings.timeout_s)
+        before = snapshot(stores)
         request = ARMS[arm]
         if request is not None:
             await asyncio.wait_for(
@@ -120,34 +168,54 @@ async def run_case(
                 ),
                 timeout=settings.timeout_s,
             )
-        if scenario.probe is not None:
+    except Exception as exc:  # noqa: BLE001 - one failed case must not end the run
+        errors.append(f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}")
+    if closed := await _close(engine):
+        errors.append(closed)
+    tokens = _usage(engine)
+
+    probe_answer = None
+    probe_records: list[dict] = []
+    if scenario.probe is not None and not errors:
+        state = local_dir(session_dir) / "harness_state.json"
+        if state.exists():
+            local_dir(probe_dir).mkdir(parents=True)
+            shutil.copy(state, local_dir(probe_dir) / "harness_state.json")
+        probe: RLMEngine | None = None
+        try:
+            probe = RLMEngine(
+                cwd=str(workspace), session=Session(probe_dir), runtime_config=config
+            )
             result = await asyncio.wait_for(
-                engine.prompt(scenario.probe.prompt), timeout=settings.timeout_s
+                probe.prompt(scenario.probe.prompt), timeout=settings.timeout_s
             )
             probe_answer = result.answer
-    except Exception as exc:  # noqa: BLE001 - one failed case must not end the run
-        error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}"
-    finally:
-        if engine is not None:
-            try:
-                await engine.aclose()
-            except Exception as exc:  # noqa: BLE001 - keep the case's graded row
-                error = (error or "") + f"\nclose failed: {exc!r}"
+        except Exception as exc:  # noqa: BLE001 - one failed case must not end the run
+            errors.append(
+                f"probe: {type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}"
+            )
+        if closed := await _close(probe):
+            errors.append(f"probe {closed}")
+        tokens += _usage(probe)
+        if (probe_dir / "messages.jsonl").exists():
+            probe_records = list(read_records(probe_dir / "messages.jsonl"))
 
     records = list(read_records(session_dir / "messages.jsonl"))
-    final = {
-        scope: [e.model_dump() for e in store.list()] for scope, store in stores.items()
-    }
-    row = grade_case(scenario, arm, records, final, probe_answer, settings.threshold)
+    row = grade_case(
+        scenario,
+        arm,
+        records,
+        before,
+        snapshot(stores),
+        probe_answer,
+        settings.threshold,
+    )
     row.update(
         repeat=repeat,
         session_dir=str(session_dir),
-        tokens=(
-            engine._total_usage.prompt_tokens + engine._total_usage.completion_tokens
-        )
-        if engine is not None
-        else None,
-        error=error,
+        tokens=tokens,
+        touched_repo=touched_repo(records + probe_records),
+        error="\n".join(errors) or None,
     )
     return row
 
@@ -158,6 +226,7 @@ async def run_all(
     repeats: int,
     settings: Settings,
     root: Path,
+    cases: Path,
     concurrency: int,
 ) -> list[dict[str, Any]]:
     gate = asyncio.Semaphore(concurrency)
@@ -165,7 +234,7 @@ async def run_all(
 
     async def one(scenario: Scenario, arm: str, repeat: int) -> dict[str, Any]:
         async with gate:
-            row = await run_case(scenario, arm, repeat, settings, root)
+            row = await run_case(scenario, arm, repeat, settings, cases)
         with results.open("a") as f:
             f.write(json.dumps(row, default=str) + "\n")
         status = "error" if row["error"] else f"decision={row['decision']}"
@@ -187,7 +256,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", help="Task model; required unless --report-only")
     parser.add_argument("--base-url", default=os.environ.get("RLM_BASE_URL"))
-    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--run-dir", required=True, help="results.jsonl and report.md")
+    parser.add_argument(
+        "--cases-dir",
+        help="Where each case's workspace, sessions and global store go. Default: a new "
+        "directory under the system temp dir; it must be outside any repository the "
+        "agent could mistake for its own",
+    )
     parser.add_argument(
         "--scenarios",
         default=",".join(s.id for s in SCENARIOS),
@@ -233,7 +308,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unknown scenarios or arms: {unknown}")
     if root.exists() and any(root.iterdir()):
         parser.error(f"{root} is not empty")
+    cases = Path(
+        args.cases_dir
+        or tempfile.mkdtemp(prefix=f"rlm-refine-eval-{root.resolve().name}-")
+    ).resolve()
+    if cases.is_relative_to(REPO):
+        parser.error(f"--cases-dir {cases} is inside this repository")
     root.mkdir(parents=True, exist_ok=True)
+    (root / "cases_dir.txt").write_text(f"{cases}\n")
+    print(f"cases: {cases}", flush=True)
 
     settings = Settings(
         model=args.model,
@@ -250,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             args.repeats,
             settings,
             root,
+            cases,
             args.concurrency,
         )
     )

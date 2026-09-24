@@ -603,14 +603,15 @@ the store the pass writes first, alongside that store's refinement history.
 }
 ```
 
-A review is two calls. The **gate** asks one yes/no question per kind of evidence
-(repeated failure, reusable tactic, delegation role, durable fact, user correction, and
-whether anything contradicts an existing entry); none at `threshold` declines after that
-one call. The **focus** call is asked only about the lessons that fired, stated as
+A review is two calls. The **gate** asks one yes/no question per kind of lesson
+(repeated failure, reusable tactic, delegation role, durable fact, user correction) and
+one per entry the pass could fix: is it contradicted by the conversation? That covers
+entries of the store the pass writes and, in a local pass, read-only global or ancestor
+entries, which get a local override. Nothing at `threshold` declines after that one
+call. The **focus** call is asked only about the lessons that fired, stated as
 premises: per lesson, whether it is already recorded (a veto at `veto_threshold`) and
 which kind should hold it; per entry of the store the pass writes, whether it covers a
-lesson or is contradicted; in a local pass, per read-only global or ancestor entry,
-whether it is contradicted; per turn, whether it is direct evidence. Questions are worded
+lesson; per turn, whether it is direct evidence. Questions are worded
 for the pass's scope: a local pass serves later tasks in this session, a global pass
 (host `global: true`) future sessions. Code turns the answers into deterministic plan
 instructions naming the home kind (one kind when the choice's confidence reaches

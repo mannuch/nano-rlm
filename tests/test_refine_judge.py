@@ -89,13 +89,18 @@ def test_build_evidence_labels_turns_counts_errors_and_trims_non_user_turns_firs
     assert 1 in kept and 5 not in kept and len(json.dumps(trimmed)) <= budget
 
 
-def test_gate_asks_contradiction_only_with_entries_and_fires_at_threshold(tmp_path):
+def test_gate_asks_about_each_contradictable_entry_and_fires_at_threshold(tmp_path):
     bare = _evidence(tmp_path / "a", [])
-    seeded = _evidence(tmp_path / "b", [], entries=[("local", "Tests", "uv run")])
-    assert CONTRADICTED not in gate_questions(bare)
-    assert CONTRADICTED in gate_questions(seeded)
-    answers = {"user_correction": 0.7, "durable_fact": 0.69, CONTRADICTED: 0.9}
+    entries = [("local", "Tests", "uv run"), ("global", "Style", "short")]
+    seeded = _evidence(tmp_path / "b", [], entries=entries)
+    assert not any(k.startswith("wrong_") for k in gate_questions(bare))
+    assert {k for k in gate_questions(seeded) if k.startswith("wrong_")} == {
+        "wrong_0",
+        "wrong_1",
+    }
+    answers = {"user_correction": 0.7, "durable_fact": 0.69, "wrong_1": 0.9}
     assert decide_gate(answers, 0.7) == ["user_correction", CONTRADICTED]
+    assert decide_gate({"wrong_0": 0.6}, 0.7) == []
 
 
 def test_focus_questions_follow_what_fired(tmp_path):
@@ -119,7 +124,7 @@ def test_focus_questions_follow_what_fired(tmp_path):
     assert lesson["home_user_correction"].type == "choice"
 
     stale = focus_questions(focus_state(evidence, [CONTRADICTED]), [CONTRADICTED])
-    assert set(stale) == {"wrong_0", "wrong_1"}
+    assert stale == {}
 
 
 def test_a_global_pass_targets_global_entries_and_future_sessions(tmp_path):
@@ -132,14 +137,12 @@ def test_a_global_pass_targets_global_entries_and_future_sessions(tmp_path):
         "global:style",
         "local:tests",
     ]
-    fact = gate_questions(evidence)["durable_fact"]
-    assert "tasks in future sessions" in fact.instructions
+    gate = gate_questions(evidence)
+    assert "tasks in future sessions" in gate["durable_fact"].instructions
+    assert {k for k in gate if k.startswith("wrong_")} == {"wrong_0"}
     fired = ["durable_fact", CONTRADICTED]
     questions = focus_questions(focus_state(evidence, fired), fired)
-    assert {k for k in questions if k.startswith(("covers_", "wrong_"))} == {
-        "covers_0",
-        "wrong_0",
-    }
+    assert {k for k in questions if k.startswith("covers_")} == {"covers_0"}
     assert "tasks in future sessions" in questions["home_durable_fact"].instructions
 
 

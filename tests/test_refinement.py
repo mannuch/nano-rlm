@@ -630,7 +630,7 @@ async def test_host_global_pass_is_judged_against_the_global_store(session, tmp_
     engine, fake = _judged_engine(
         client,
         session,
-        [{"harness_contradicted": 0.9}, {"wrong_0": 0.9}],
+        [{"wrong_0": 0.9}],
         auto_refine=False,
         global_dir=str(global_dir),
     )

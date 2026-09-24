@@ -113,7 +113,7 @@ def test_grade_case_scores_gate_focus_and_edits():
     )
     final = {"local": [{"title": "Test command", "content": "uv run pytest"}]}
 
-    row = grade_case(scenario, "typesafe", records, final, None, 0.7)
+    row = grade_case(scenario, "typesafe", records, {}, final, None, 0.7)
 
     assert row["decision"] is True and row["expect_refine"] is True
     assert row["rationale"] == "the user corrected it"
@@ -127,6 +127,7 @@ def test_grade_case_scores_gate_focus_and_edits():
         _ledger(
             BY_ID["one_off"].steer, {"reason": "no_edits", "rationale": "noise"}, []
         ),
+        {},
         {},
         None,
         0.7,
@@ -149,7 +150,8 @@ def test_grade_case_scores_gate_focus_and_edits():
 
 def test_a_lesson_the_agent_recorded_first_is_graded_as_a_decline():
     """The agent saved the correction itself during the steering turns, so the
-    judge's veto is the right call and the pass is not blamed for creating nothing."""
+    judge's veto is the right call and the pass is not blamed for creating nothing.
+    Any store the session sees counts; an entry the eval seeded does not."""
     scenario = BY_ID["user_correction"]
     judge = {
         "gate_decision": False,
@@ -169,22 +171,40 @@ def test_a_lesson_the_agent_recorded_first_is_graded_as_a_decline():
         "title": "Line counting",
         "content": "line counts never include blank lines",
         "source": "agent",
-        "updated_at": "2027-01-15T07:00:00+00:00",  # before PASS_AT
     }
 
-    row = grade_case(scenario, "typesafe", records, {"local": [saved]}, None, 0.7)
-
-    assert row["agent_recorded_first"] and row["label_refine"] is True
-    assert row["expect_refine"] is False and row["decision"] is False
-    assert row["edit_checks"] == {"lesson recorded": True}
-    assert row["judge"]["captured_hit"] == 1
-    assert row["judge"]["lesson_turn_hit"] is None
+    for store in ("local", "global"):
+        row = grade_case(
+            scenario, "typesafe", records, {store: [saved]}, {store: [saved]}, None, 0.7
+        )
+        assert row["agent_recorded_first"] and row["label_refine"] is True
+        assert row["expect_refine"] is False and row["decision"] is False
+        assert row["edit_checks"] == {"lesson recorded": True}
+        assert row["judge"]["captured_hit"] == 1
+        assert row["judge"]["lesson_turn_hit"] is None
     assert "In 1, the agent recorded the lesson itself" in report([row], [0.7])
 
-    later = {**saved, "updated_at": "2027-02-01T08:00:00+00:00"}  # during the probe
-    assert not grade_case(scenario, "typesafe", records, {"local": [later]}, None, 0.7)[
-        "agent_recorded_first"
-    ]
+    seeded = {**saved, "source": "eval"}
+    assert not grade_case(
+        scenario, "typesafe", records, {"local": [seeded]}, {}, None, 0.7
+    )["agent_recorded_first"]
+    written_later = grade_case(
+        scenario, "typesafe", records, {}, {"local": [saved]}, None, 0.7
+    )
+    assert not written_later["agent_recorded_first"]
+    assert written_later["edit_checks"]["lesson recorded"]
+
+
+def test_touched_repo_ignores_the_runtime_install():
+    from run import REPO, touched_repo
+
+    def tool(text):
+        return {"type": "tool_result", "content": text}
+
+    assert touched_repo([tool(f"cat {REPO}/AGENTS.md")])
+    assert not touched_repo([tool(f"File {REPO}/.venv/lib/python3.14/x.py")])
+    assert not touched_repo([tool(f"{REPO}/src/rlm/engine.py")])
+    assert not touched_repo([{"type": "context_window", "path": f"{REPO}/README.md"}])
 
 
 async def test_run_case_seeds_the_global_store_and_runs_a_global_pass(
@@ -236,3 +256,49 @@ async def test_run_case_seeds_the_global_store_and_runs_a_global_pass(
     plan = client.calls[2]["messages"][-1]["content"]
     assert "Requested scope: global" in plan
     assert "[global:answer-style]" in plan
+
+
+async def test_run_case_probes_in_a_fresh_session_that_starts_from_the_harness(
+    monkeypatch, tmp_path
+):
+    """The probe cannot see the steering conversation, only what the pass wrote."""
+    from conftest import DummyClient, DummyMessage
+    from run import Settings, run_case
+
+    scenario = BY_ID["user_correction"]
+    proposal = {
+        "summary": "line counts exclude blank lines",
+        "rationale": "the user corrected the count",
+        "expected_outcome": "right counts",
+        "edits": [
+            {
+                "action": "create",
+                "kind": "memory",
+                "title": "Line counts",
+                "content": "In this project line counts exclude blank lines.",
+            }
+        ],
+    }
+    client = DummyClient(
+        [
+            DummyMessage(content="ANSWER: 10"),
+            DummyMessage(content="ANSWER: 6"),
+            DummyMessage(content=json.dumps(proposal)),
+            DummyMessage(content="Counting non-blank lines. ANSWER: 4"),
+        ]
+    )
+
+    async def close():
+        pass
+
+    client.close = close
+    monkeypatch.setattr("rlm.engine.make_client", lambda provider: client)
+    settings = Settings(model="dummy", api_key="k", base_url=None, typesafe_api_key="t")
+
+    row = await run_case(scenario, "force", 0, settings, tmp_path)
+
+    assert row["error"] is None and row["probe"] == 1.0
+    assert row["touched_repo"] is False
+    probe = client.calls[3]["messages"]
+    assert not any(scenario.steer[1] in str(m.get("content")) for m in probe)
+    assert "line counts exclude blank lines" in probe[0]["content"]
