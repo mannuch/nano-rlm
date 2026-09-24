@@ -342,10 +342,6 @@ class RLMEngine:
         self._last_request_id: str | None = None
         self._task_text = ""
 
-        # Set once the provider answers a side call with tool calls despite
-        # tool_choice="none"; later side calls then go without tool schemas.
-        self._side_calls_without_tools = False
-
         # Continual harness refinement bookkeeping.
         self._refinement_count = 0
         self._refinement_records: list[dict[str, Any]] = []
@@ -1321,9 +1317,7 @@ class RLMEngine:
             "messages": messages,
             "extra_headers": model_call_headers(request_id),
         }
-        if self._active_tool_schemas and not (
-            checkpoint and self._side_calls_without_tools
-        ):
+        if self._active_tool_schemas:
             request["tools"] = self._active_tool_schemas
             if checkpoint:
                 request["tool_choice"] = "none"
@@ -1339,12 +1333,6 @@ class RLMEngine:
             raise
         self._semantic_edges.finish_request(request_id)
         self._last_request_id = request_id
-        if checkpoint and "tools" in request and response.choices[0].message.tool_calls:
-            logger.warning(
-                "rlm: the provider ignored tool_choice='none' on a side call; "
-                "side calls now go without tool schemas"
-            )
-            self._side_calls_without_tools = True
         usage = extract_usage(response)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
@@ -1435,8 +1423,7 @@ class RLMEngine:
 
         Forwarding active tool schemas preserves vLLM's system-message tool block
         and prime-rl's trajectory extension property across compaction.
-        ``tool_choice="none"`` forbids tool calls in side responses; once a provider
-        ignores it, side calls go without the schemas and the reply is resampled.
+        ``tool_choice="none"`` forbids tool calls in side responses.
         """
         indices = self.session.context_indices
         tail_start = select_tail(

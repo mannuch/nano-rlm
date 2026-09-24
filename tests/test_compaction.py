@@ -723,11 +723,6 @@ async def test_failed_rollup_keeps_finer_blocks(session):
     ledger = await history(session.dir)
     assert [b["tier"] for b in ledger.blocks] == [1, 1]
     assert ledger.events[-1]["type"] != "rollup"
-    # The first rollup reply ignored tool_choice="none": the retry goes without tool
-    # schemas, and work turns keep them.
-    assert client.calls[4]["tool_choice"] == "none"
-    assert "tools" not in client.calls[5] and "tool_choice" not in client.calls[5]
-    assert "tools" in client.calls[6]
 
 
 async def test_rollup_calls_share_one_budget_per_compaction(session):
