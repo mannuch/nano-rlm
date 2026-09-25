@@ -108,6 +108,10 @@ task also allowlists `api.typesafe.ai`.
 - **Grading is unchanged:** the agent's changes to the repository are captured as a diff
   and replayed in a fresh box, where the upstream verifier runs. The module also exports
   prime-envs' `HarborEnv`, which does that.
+- **Compaction threshold:** the SWE configs compact at 80k tokens, not 25k like TBLite. At
+  25k, a few source files filled the context. The agent then re-read them after every
+  compaction until it ran out of its 1M-token budget: two of three smoke tasks never got
+  past this.
 - **Configs:** the `swe_*.toml` configs run the 51-task HARD-51 subset (`subset = "hard51"`):
   - `configs/swe_smoke.toml`: 3 tasks, the judge gating
   - `configs/swe_off.toml`, `swe_planner.toml`, `swe_gate.toml`: the three arms, 2 rollouts
