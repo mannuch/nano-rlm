@@ -145,7 +145,7 @@ Three configs run the same tasks and differ only in nano-rlm's `harness` table:
 | config | refinement |
 |---|---|
 | `configs/ab_off.toml` | auto-refinement off (the baseline) |
-| `configs/ab_planner.toml` | auto-refinement on; the planner (task model) decides every pass |
+| `configs/ab_planner.toml` | auto-refinement on; the planner (task model) decides every pass (`auto_refine_review = "planner"`) |
 | `configs/ab_gate.toml` | auto-refinement on; the TypeSafe judge gates every pass first |
 
 ```bash

@@ -10,7 +10,7 @@ id = "rlm-refine"
 
 [env.agent.harness]
 id = "rlm-refine"
-version = "4dacd2b1de2765ea775255d6712464234da06790"
+version = "110ec934e0231ed12aea909c0b985d1cadd90baa"
 forward_env = ["TYPESAFE_API_KEY"]
 
 [env.agent.harness.policy]
@@ -18,6 +18,7 @@ summarize_at_tokens = 25000
 
 [env.agent.harness.harness]
 auto_refine = true
+auto_refine_review = "planner"   # no judge: the task model decides every pass
 refine_turn_interval = 8
 refine_cooldown_seconds = 0
 
