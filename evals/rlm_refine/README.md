@@ -109,7 +109,16 @@ uv run vf-eval @ configs/ab_gate.toml
 
 Each config runs 100 tasks with 3 rollouts per task. Compare pass rates per task across the
 arms (paired by task), not only in aggregate. Tasks differ far more from one another than
-the arms are likely to.
+the arms are likely to. `compare.py` does this:
+
+```bash
+uv run python compare.py off=outputs/<off run>/traces.jsonl \
+  planner=outputs/<planner run>/traces.jsonl gate=outputs/<gate run>/traces.jsonl
+```
+
+It leaves out rollouts that errored, such as provider failures, and pairs the tasks scored in
+every arm. It reports each pairwise difference in mean reward, with a 95% interval
+bootstrapped over tasks, then the refinement and judge totals per arm.
 
 Every config uses `deepseek/deepseek-v4.1-flash`. Don't use
 `deepseek/deepseek-v4-flash` here. On Prime Inference it ignores `tool_choice="none"`,
