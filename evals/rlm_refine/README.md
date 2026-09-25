@@ -109,7 +109,10 @@ uv run vf-eval @ configs/smoke_no_judge.toml   # 1 task, expected to fail
   and no pass in `info.rlm_refinements` has a `judge` object.
 - **`smoke_no_judge.toml`** turns auto-refinement on with neither a judge nor the opt-out.
   nano-rlm rejects it at `session/new`, so the rollout errors before any model call, with
-  "auto_refine needs refine_judge" in the error.
+  0 calls and `HarnessError: ... RequestError: Invalid params`. Verifiers doesn't pass
+  on the reason nano-rlm sends with a `session/new` error. To see it, run the harness
+  table through `rlm.acp._runtime_config` locally: the error names `harness`, and its
+  cause is "auto_refine needs refine_judge".
 
 ## SWE-bench Pro
 
