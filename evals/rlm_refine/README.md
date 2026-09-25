@@ -119,9 +119,10 @@ task also allowlists `api.typesafe.ai`.
   The TBLite configs leave it off.
 - **Configs:** the `swe_*.toml` configs run the 51-task HARD-51 subset (`subset = "hard51"`):
   - `configs/swe_smoke.toml`: 3 tasks, the judge gating
-  - `configs/swe_off.toml`, `swe_planner.toml`, `swe_gate.toml`: the three arms, on the first
-    5 tasks with 2 rollouts each (10 rollouts per arm) to keep cost down. Without
-    `shuffle`, every arm runs the same 5 tasks. Remove `num_tasks` to run all 51.
+  - `configs/swe_off.toml`, `swe_planner.toml`, `swe_gate.toml`: the three arms, on 5 tasks
+    with 2 rollouts each (10 rollouts per arm) to keep cost down. `shuffle = true` picks the
+    5 with verifiers' fixed seed, so every arm runs the same 5. None of them is among the
+    smoke run's 3 (the subset's first 3). Remove `num_tasks` to run all 51.
 
 ```bash
 uv run vf-eval @ configs/swe_smoke.toml

@@ -5,6 +5,7 @@
 model = "deepseek/deepseek-v4.1-flash"
 num_rollouts = 2
 num_tasks = 5
+shuffle = true   # verifiers' fixed seed: the same 5 tasks in every arm, none of them in swe_smoke
 
 [env.taskset]
 id = "rlm-refine-swebench-pro"
