@@ -96,6 +96,21 @@ one trace per task. `--resume <output-dir>` re-runs missing or errored rollouts.
   `mode: "shadow"`, `gate_decision` and per-call `usage`. TypeSafe input tokens stay well
   under 32k per call.
 
+Two more smoke configs cover how nano-rlm decides who reviews automatic passes. Neither
+needs `TYPESAFE_API_KEY`:
+
+```bash
+uv run vf-eval @ configs/smoke_planner.toml    # 3 tasks, the planner deciding alone
+uv run vf-eval @ configs/smoke_no_judge.toml   # 1 task, expected to fail
+```
+
+- **`smoke_planner.toml`** opts out of the judge with `auto_refine_review = "planner"`.
+  Rollouts finish, `num_auto_refine_reviews` > 0 on longer tasks, `num_judge_reviews` = 0,
+  and no pass in `info.rlm_refinements` has a `judge` object.
+- **`smoke_no_judge.toml`** turns auto-refinement on with neither a judge nor the opt-out.
+  nano-rlm rejects it at `session/new`, so the rollout errors before any model call, with
+  "auto_refine needs refine_judge" in the error.
+
 ## SWE-bench Pro
 
 `rlm-refine-swebench-pro` is prime-envs' SWE-bench Pro V2 taskset with one change: every
