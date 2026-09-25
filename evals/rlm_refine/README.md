@@ -167,6 +167,14 @@ It leaves out rollouts that errored, such as provider failures, and pairs the ta
 every arm. It reports each pairwise difference in mean reward, with a 95% interval
 bootstrapped over tasks, then the refinement and judge totals per arm.
 
+For cost, it reports dollars per rollout and the share of input tokens read from the
+provider's prompt cache. The dollars are the billed cost of the task model's calls plus the
+TypeSafe judge at its list price. `--metric=cost` compares that cost per task, the way it
+compares reward. Don't compare arms by verifiers' `num_total_tokens`. It counts each
+distinct input token once, so it leaves out the conversation's repeated, cached re-reads,
+which make up most of a rollout's bill, and it inflates the relative cost of refinement
+calls.
+
 Every config uses `deepseek/deepseek-v4.1-flash`. Don't use
 `deepseek/deepseek-v4-flash` here. On Prime Inference it ignores `tool_choice="none"`,
 which nano-rlm's compaction and refinement calls rely on. In the first shadow run, 184

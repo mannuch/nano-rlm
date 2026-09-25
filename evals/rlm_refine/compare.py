@@ -2,11 +2,18 @@
 
     python compare.py off=outputs/<run>/traces.jsonl planner=... gate=...
     python compare.py --metric=required_tests_passed off=... planner=... gate=...
+    python compare.py --metric=cost off=... planner=... gate=...
 
 Rollouts whose trace carries an error (provider failures, for example) are left out;
 tasks are paired over those with a scored rollout in every arm. Differences are per-task
-means of the reward, or of a numeric trace metric with `--metric`, with 95% intervals
-bootstrapped over tasks.
+means of the reward, of a numeric trace metric with `--metric`, or of the rollout's cost
+in dollars with `--metric=cost`, with 95% intervals bootstrapped over tasks.
+
+Cost is what the provider billed for the task model's calls (each call's `usage.cost`,
+cached reads at their discount), plus the TypeSafe judge's input tokens at its list
+price. Verifiers' `num_total_tokens` counts each distinct input token once, so it leaves
+out the repeated, cached re-reads of the conversation that make up most of a rollout's
+bill.
 """
 
 import json
@@ -14,6 +21,9 @@ import random
 import statistics as st
 import sys
 from collections import Counter, defaultdict
+
+TYPESAFE_USD_PER_INPUT_TOKEN = 0.042 / 1e6
+"""TypeSafe's list price, $0.042 per 1M input tokens; output is free."""
 
 REFINE_METRICS = (
     "num_compactions",
@@ -36,13 +46,20 @@ def load(path: str, metric: str) -> list[dict]:
         errors = trace.get("errors") or []
         metrics = trace.get("metrics") or {}
         reward = (trace.get("rewards") or {}).get("solved", {}).get("score")
+        usage = [call["usage"] for call in trace.get("calls") or [] if call.get("usage")]
+        model_cost = sum(u.get("cost") or 0 for u in usage)
+        judge_cost = (metrics.get("judge_input_tokens") or 0) * TYPESAFE_USD_PER_INPUT_TOKEN
+        values = {"reward": reward, "cost": model_cost + judge_cost}
         rows.append(
             {
                 "task": episode["task"]["data"]["name"],
                 "error": errors[0].get("type") if errors else None,
-                "value": reward if metric == "reward" else metrics.get(metric),
+                "value": values[metric] if metric in values else metrics.get(metric),
                 "stop": trace.get("stop_condition"),
-                "tokens": trace.get("num_total_tokens") or 0,
+                "model_cost": model_cost,
+                "judge_cost": judge_cost,
+                "input": sum(u.get("prompt_tokens", 0) + u.get("cached_input_tokens", 0) for u in usage),
+                "cached": sum(u.get("cached_input_tokens", 0) for u in usage),
                 "metrics": metrics,
             }
         )
@@ -70,15 +87,22 @@ def main(args: list[str]) -> None:
         for name, rows in arms.items()
     }
 
-    print("| arm | rollouts | scored | errors | stops | tokens/rollout |")
-    print("|---|---|---|---|---|---|")
+    print(
+        "| arm | rollouts | scored | errors | stops | $/rollout | model $ | judge $ "
+        "| input tokens/rollout | cached |"
+    )
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for name, rows in arms.items():
         errors = Counter(r["error"] for r in rows if r["error"])
         stops = Counter(r["stop"] for r in rows)
-        tokens = st.mean(r["tokens"] for r in scored[name]) if scored[name] else 0
+        ok = scored[name] or [{"model_cost": 0, "judge_cost": 0, "input": 0, "cached": 0}]
+        model = st.mean(r["model_cost"] for r in ok)
+        judge = st.mean(r["judge_cost"] for r in ok)
+        cached = sum(r["cached"] for r in ok) / max(1, sum(r["input"] for r in ok))
         print(
             f"| {name} | {len(rows)} | {len(scored[name])} | {dict(errors) or '-'} "
-            f"| {dict(stops)} | {tokens:,.0f} |"
+            f"| {dict(stops)} | {model + judge:.4f} | {model:.4f} | {judge:.4f} "
+            f"| {st.mean(r['input'] for r in ok):,.0f} | {cached:.0%} |"
         )
 
     per_task = {name: defaultdict(list) for name in arms}
@@ -91,20 +115,20 @@ def main(args: list[str]) -> None:
     print(f"| arm | mean {metric} |")
     print("|---|---|")
     for name in arms:
-        print(f"| {name} | {st.mean(means[name].values()):.3f} |")
+        print(f"| {name} | {st.mean(means[name].values()):.4f} |")
 
-    print("\n| comparison | difference | 95% interval | tasks better / worse / same |")
+    print("\n| comparison | difference | 95% interval | tasks higher / lower / same |")
     print("|---|---|---|---|")
     names = list(arms)
     for i, a in enumerate(names):
         for b in names[i + 1 :]:
             diffs = [means[b][t] - means[a][t] for t in tasks]
             mean, low, high = bootstrap(diffs)
-            better = sum(d > 0 for d in diffs)
-            worse = sum(d < 0 for d in diffs)
+            higher = sum(d > 0 for d in diffs)
+            lower = sum(d < 0 for d in diffs)
             print(
-                f"| {b} − {a} | {mean:+.3f} | {low:+.3f} to {high:+.3f} "
-                f"| {better} / {worse} / {len(diffs) - better - worse} |"
+                f"| {b} − {a} | {mean:+.4f} | {low:+.4f} to {high:+.4f} "
+                f"| {higher} / {lower} / {len(diffs) - higher - lower} |"
             )
 
     print("\n| arm | " + " | ".join(REFINE_METRICS) + " |")
