@@ -2256,12 +2256,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "openthoughts-tblite" },
+    { name = "swebench-pro" },
     { name = "verifiers", extra = ["harbor"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "openthoughts-tblite", git = "https://github.com/PrimeIntellect-ai/prime-envs?subdirectory=environments%2Fterminal%2Fopenthoughts_tblite&rev=7cba75640431e3d06fcf7ccc24b01a1ce2cc31ae" },
+    { name = "swebench-pro", git = "https://github.com/PrimeIntellect-ai/prime-envs?subdirectory=environments%2Fswe%2Fswebench_pro&rev=7cba75640431e3d06fcf7ccc24b01a1ce2cc31ae" },
     { name = "verifiers", extras = ["harbor"], git = "https://github.com/PrimeIntellect-ai/verifiers?rev=1863cfbdc75aa3ce708f534cf633e69a5f08fdd6" },
 ]
 
@@ -2511,6 +2513,14 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/84/5d/61c2446ed26a57fa5543f9c270a731320911569202340d15341f72cdba7c/supabase_functions-2.31.0.tar.gz", hash = "sha256:4ad027b3ae3bd28b31233339f4db1da6965affd3546f655b421baf40cee2690f", size = 4683, upload-time = "2026-06-04T13:37:28.878Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/90/79/1a8162ce7d705381a4f2668c0da68e097b103c1aa701418a31da52905c7b/supabase_functions-2.31.0-py3-none-any.whl", hash = "sha256:3fdc4c4766152bfda63bdd0e286fc8a06f50e1280711fae4a1dfc9b7e9ebabc6", size = 8794, upload-time = "2026-06-04T13:37:28.022Z" },
+]
+
+[[package]]
+name = "swebench-pro"
+version = "0.2.1"
+source = { git = "https://github.com/PrimeIntellect-ai/prime-envs?subdirectory=environments%2Fswe%2Fswebench_pro&rev=7cba75640431e3d06fcf7ccc24b01a1ce2cc31ae#7cba75640431e3d06fcf7ccc24b01a1ce2cc31ae" }
+dependencies = [
+    { name = "verifiers", extra = ["harbor"] },
 ]
 
 [[package]]

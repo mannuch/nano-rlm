@@ -1,10 +1,12 @@
 """Compare vf-eval runs of the same taskset, paired by task.
 
     python compare.py off=outputs/<run>/traces.jsonl planner=... gate=...
+    python compare.py --metric=required_tests_passed off=... planner=... gate=...
 
 Rollouts whose trace carries an error (provider failures, for example) are left out;
 tasks are paired over those with a scored rollout in every arm. Differences are per-task
-mean rewards, with 95% intervals bootstrapped over tasks.
+means of the reward, or of a numeric trace metric with `--metric`, with 95% intervals
+bootstrapped over tasks.
 """
 
 import json
@@ -26,20 +28,22 @@ REFINE_METRICS = (
 )
 
 
-def load(path: str) -> list[dict]:
+def load(path: str, metric: str) -> list[dict]:
     rows = []
     for line in open(path):
         episode = json.loads(line)
         trace = episode["traces"][0]
         errors = trace.get("errors") or []
+        metrics = trace.get("metrics") or {}
+        reward = (trace.get("rewards") or {}).get("solved", {}).get("score")
         rows.append(
             {
                 "task": episode["task"]["data"]["name"],
                 "error": errors[0].get("type") if errors else None,
-                "reward": (trace.get("rewards") or {}).get("solved", {}).get("score"),
+                "value": reward if metric == "reward" else metrics.get(metric),
                 "stop": trace.get("stop_condition"),
                 "tokens": trace.get("num_total_tokens") or 0,
-                "metrics": trace.get("metrics") or {},
+                "metrics": metrics,
             }
         )
     return rows
@@ -52,9 +56,17 @@ def bootstrap(diffs: list[float], n: int = 10_000) -> tuple[float, float, float]
 
 
 def main(args: list[str]) -> None:
-    arms = {name: load(path) for name, path in (arg.split("=", 1) for arg in args)}
+    metric = "reward"
+    paths = {}
+    for arg in args:
+        key, value = arg.split("=", 1)
+        if key == "--metric":
+            metric = value
+        else:
+            paths[key] = value
+    arms = {name: load(path, metric) for name, path in paths.items()}
     scored = {
-        name: [r for r in rows if not r["error"] and r["reward"] is not None]
+        name: [r for r in rows if not r["error"] and r["value"] is not None]
         for name, rows in arms.items()
     }
 
@@ -72,11 +84,11 @@ def main(args: list[str]) -> None:
     per_task = {name: defaultdict(list) for name in arms}
     for name, rows in scored.items():
         for r in rows:
-            per_task[name][r["task"]].append(r["reward"])
+            per_task[name][r["task"]].append(r["value"])
     tasks = sorted(set.intersection(*(set(t) for t in per_task.values())))
     means = {name: {t: st.mean(per_task[name][t]) for t in tasks} for name in arms}
     print(f"\nPaired over {len(tasks)} tasks scored in every arm.\n")
-    print("| arm | mean reward |")
+    print(f"| arm | mean {metric} |")
     print("|---|---|")
     for name in arms:
         print(f"| {name} | {st.mean(means[name].values()):.3f} |")

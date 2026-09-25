@@ -1,23 +1,25 @@
 [project]
 name = "rlm-refine"
 version = "0.1.0"
-description = "nano-rlm with auto-refinement and the TypeSafe judge, as a verifiers v1 harness, on OpenThoughts TBLite."
+description = "nano-rlm with auto-refinement and the TypeSafe judge, as a verifiers v1 harness, on OpenThoughts TBLite and SWE-bench Pro."
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "verifiers[harbor]",
     "openthoughts-tblite",
+    "swebench-pro",
 ]
 
 [tool.uv.sources]
 verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers", rev = "1863cfbdc75aa3ce708f534cf633e69a5f08fdd6" }
 openthoughts-tblite = { git = "https://github.com/PrimeIntellect-ai/prime-envs", subdirectory = "environments/terminal/openthoughts_tblite", rev = "7cba75640431e3d06fcf7ccc24b01a1ce2cc31ae" }
+swebench-pro = { git = "https://github.com/PrimeIntellect-ai/prime-envs", subdirectory = "environments/swe/swebench_pro", rev = "7cba75640431e3d06fcf7ccc24b01a1ce2cc31ae" }
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rlm_refine"]
+packages = ["rlm_refine", "rlm_refine_swebench_pro"]
 
 # Type-check against this project's own environment, not an active one (the repo's).
 [tool.ty.environment]

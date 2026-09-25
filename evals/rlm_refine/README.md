@@ -1,10 +1,14 @@
 # rlm-refine
 
 This runs nano-rlm with automatic refinement on, as a
-[verifiers v1](https://docs.primeintellect.ai/verifiers/v1/overview) harness, on
-[OpenThoughts TBLite](https://github.com/PrimeIntellect-ai/prime-envs/tree/main/environments/terminal/openthoughts_tblite).
-TBLite has 100 terminal tasks, each in its own prebuilt container and scored by the task's
-hidden pass/fail verifier.
+[verifiers v1](https://docs.primeintellect.ai/verifiers/v1/overview) harness, on two
+tasksets from prime-envs:
+
+- [OpenThoughts TBLite](https://github.com/PrimeIntellect-ai/prime-envs/tree/main/environments/terminal/openthoughts_tblite):
+  100 terminal tasks, each in its own prebuilt container and scored by the task's hidden
+  pass/fail verifier.
+- [SWE-bench Pro V2](https://github.com/PrimeIntellect-ai/prime-envs/tree/main/environments/swe/swebench_pro):
+  harder, long-context repository work. See "SWE-bench Pro" below.
 
 The first experiment is a **shadow run**. The planner (the task model) decides every
 automatic refinement pass. The TypeSafe judge reviews the same evidence, but its verdict is
@@ -16,7 +20,8 @@ only recorded. The run measures:
 
 ## What's in the package
 
-The package exports a harness and a taskset.
+The `rlm_refine` module exports the harness and the TBLite taskset. `rlm_refine_swebench_pro`
+exports the SWE-bench Pro taskset.
 
 - **`RlmRefineHarness`** installs nano-rlm from a git commit (`repo`, `version`) and runs it
   over ACP.
@@ -90,6 +95,37 @@ one trace per task. `--resume <output-dir>` re-runs missing or errored rollouts.
 - `info.rlm_refinements` holds `auto:` passes, each with a `judge` object carrying
   `mode: "shadow"`, `gate_decision` and per-call `usage`. TypeSafe input tokens stay well
   under 32k per call.
+
+## SWE-bench Pro
+
+`rlm-refine-swebench-pro` is prime-envs' SWE-bench Pro V2 taskset with one change: every
+task also allowlists `api.typesafe.ai`.
+
+- **Why it's needed:** the V2 protocol runs the agent offline, apart from hosts a task
+  allowlists, and the judge calls TypeSafe from inside the sandbox. Everything else, PyPI
+  included, stays blocked, as the benchmark intends. nano-rlm's install runs during setup,
+  which stays online.
+- **Grading is unchanged:** the agent's changes to the repository are captured as a diff
+  and replayed in a fresh box, where the upstream verifier runs. The module also exports
+  prime-envs' `HarborEnv`, which does that.
+- **Configs:** the `swe_*.toml` configs run the 51-task HARD-51 subset (`subset = "hard51"`):
+  - `configs/swe_smoke.toml`: 3 tasks, the judge gating
+  - `configs/swe_off.toml`, `swe_planner.toml`, `swe_gate.toml`: the three arms, 2 rollouts
+    per task
+
+```bash
+uv run vf-eval @ configs/swe_smoke.toml
+uv run vf-eval @ configs/swe_off.toml
+uv run vf-eval @ configs/swe_planner.toml
+uv run vf-eval @ configs/swe_gate.toml
+```
+
+Few HARD-51 tasks may pass outright. The taskset also records `required_tests_passed`, the
+fraction of the task's required tests that pass. Compare it too, with
+`python compare.py --metric=required_tests_passed ...`.
+
+The traces record the captured diff in `info.model_patch`. Check in the smoke run that it
+holds only the agent's changes to the repository: nano-rlm's own files live under `/tmp`.
 
 ## Reward comparison
 

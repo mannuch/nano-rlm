@@ -1,0 +1,27 @@
+# SWE-bench Pro V2 HARD-51, arm "smoke": 3 HARD-51 tasks with the judge gating, to check the harness on SWE-bench Pro.
+#
+#   uv run vf-eval @ configs/swe_smoke.toml
+model = "deepseek/deepseek-v4.1-flash"
+num_rollouts = 1
+num_tasks = 3
+
+[env.taskset]
+id = "rlm-refine-swebench-pro"
+subset = "hard51"
+
+[env.agent.harness]
+id = "rlm-refine"
+version = "4dacd2b1de2765ea775255d6712464234da06790"
+forward_env = ["TYPESAFE_API_KEY"]
+
+[env.agent.harness.policy]
+summarize_at_tokens = 25000
+
+[env.agent.harness.harness]
+auto_refine = true
+refine_turn_interval = 8
+refine_cooldown_seconds = 0
+refine_judge = { mode = "gate" }
+
+[env.agent.runtime]
+type = "prime"
