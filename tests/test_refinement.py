@@ -14,6 +14,7 @@ from conftest import (
     make_runtime_config,
     tool_result,
 )
+from pydantic import ValidationError
 
 from rlm.config import ExecutionPolicy, HarnessConfig, RefineJudgeConfig
 from rlm.engine import RLMEngine
@@ -453,7 +454,10 @@ async def test_auto_refine_plans_on_interval_and_an_empty_plan_declines(session)
     )
     config = make_runtime_config(
         harness=HarnessConfig(
-            auto_refine=True, refine_turn_interval=2, refine_cooldown_seconds=0
+            auto_refine=True,
+            auto_refine_review="planner",
+            refine_turn_interval=2,
+            refine_cooldown_seconds=0,
         )
     )
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
@@ -692,7 +696,9 @@ async def test_auto_refine_after_compaction_plans_on_the_new_blocks(session):
     )
     config = make_runtime_config(
         policy=ExecutionPolicy(summarize_at_tokens=1),
-        harness=HarnessConfig(auto_refine=True, refine_cooldown_seconds=0),
+        harness=HarnessConfig(
+            auto_refine=True, auto_refine_review="planner", refine_cooldown_seconds=0
+        ),
     )
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
@@ -739,6 +745,8 @@ async def test_auto_refine_is_root_only_and_off_by_default(session):
     assert len(client.calls) == 4
     assert _records(session, "refinement") == []
     assert _records(session, "refinement_declined") == []
+    with pytest.raises(ValidationError, match="auto_refine needs refine_judge"):
+        HarnessConfig(auto_refine=True)
 
 
 async def test_max_refinements_declines_further_passes(session):

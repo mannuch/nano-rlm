@@ -413,6 +413,7 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "max_prompt_content_chars": 180,
   "max_prompt_refinements": 5,
   "auto_refine": false,
+  "auto_refine_review": "judge",
   "refine_turn_interval": 12,
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
@@ -571,7 +572,8 @@ Three triggers, all of which run between model calls and never inside a cell:
   appended after them. A rollback takes neither. The key is refused when the harness is
   disabled, and `review` or `focus` is refused without `refine_judge`.
 - **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
-  work turns and after each compaction, subject to `refine_cooldown_seconds`, a planning
+  work turns and after each compaction, subject to `refine_cooldown_seconds`, the TypeSafe
+  judge reviews the pass (see below) and, unless it declines, a planning
   call runs with an `<automatic_refinement>` section: the pass was not requested, so edit
   only on evidence useful to this session's future turns (a repeated failure, a reusable
   tactic, a repeated delegation role, a durable fact or preference, a user correction) and
@@ -585,8 +587,11 @@ Three triggers, all of which run between model calls and never inside a cell:
 
 `refine_judge` puts TypeSafe's System One model (Jev) in front of the planning call. Jev
 answers typed yes/no and choice questions with calibrated probabilities; the task model
-still writes the plan and may still decline it. The judge is opt-in, root agent only, and
-sends a compact evidence state to the TypeSafe API: the messages since the last pass
+still writes the plan and may still decline it. Automatic passes need the judge:
+`auto_refine` without `refine_judge` fails validation at `session/new`. Only
+`auto_refine_review: "planner"` lets the task model decide automatic passes alone, with
+no judge call, e.g. as a baseline. For host passes the judge stays opt-in (`review`,
+`focus`). It runs for the root agent only and sends a compact evidence state to the TypeSafe API: the messages since the last pass
 (clipped, newest first, user turns kept ahead of the rest), exception counts, the
 compaction blocks behind the pass, and the visible harness entries with the entries of
 the store the pass writes first, alongside that store's refinement history.

@@ -90,6 +90,11 @@ class HarnessConfig(_ConfigModel):
     auto_refine: bool = False
     """Let the root engine review its own trajectory every ``refine_turn_interval``
     work turns (and after each compaction) and refine when the review approves."""
+    auto_refine_review: Literal["judge", "planner"] = "judge"
+    """Who decides an automatic pass. ``judge`` needs ``refine_judge`` whenever
+    ``auto_refine`` is on, and the judge's ``mode`` gates or shadows the planning call.
+    ``planner`` leaves the decision to the task model alone and never consults the
+    judge, e.g. for a baseline without it."""
     refine_turn_interval: int = Field(default=12, gt=0)
     refine_cooldown_seconds: int = Field(default=300, ge=0)
     max_refinements: int | None = Field(default=None, gt=0)
@@ -97,8 +102,8 @@ class HarnessConfig(_ConfigModel):
     max_refinement_attempts: int = Field(default=3, gt=0)
     """Proposal attempts within one pass; an unusable reply is resampled."""
     refine_judge: RefineJudgeConfig | None = None
-    """TypeSafe judge for auto-refine reviews and host-requested reviews. None keeps
-    every review on the task model."""
+    """TypeSafe judge for auto-refine reviews and host-requested reviews. Required by
+    ``auto_refine`` unless ``auto_refine_review`` is ``planner``."""
     skills_dir: str | None = None
     """Persistent directory of agent-authored skill packages, put on the kernel's
     sys.path at start. None (default) keeps authored packages session-local."""
@@ -107,6 +112,19 @@ class HarnessConfig(_ConfigModel):
     the task, the coarsest compaction blocks, the outcome and the session directory.
     Requires ``global_dir``. Off by default because a global store shared across RL
     rollouts would let one rollout read another's outcome."""
+
+    @model_validator(mode="after")
+    def _validate_auto_refine_review(self) -> Self:
+        if (
+            self.auto_refine
+            and self.auto_refine_review == "judge"
+            and self.refine_judge is None
+        ):
+            raise ValueError(
+                "auto_refine needs refine_judge; set auto_refine_review to "
+                "'planner' to let the task model decide automatic passes alone"
+            )
+        return self
 
 
 class ExecutionPolicy(_ConfigModel):

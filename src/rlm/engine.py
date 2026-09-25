@@ -1797,7 +1797,7 @@ class RLMEngine:
         self._turns_since_refine_review = 0
         self._last_refine_review_at = now
 
-        judge = config.refine_judge
+        judge = config.refine_judge if config.auto_refine_review == "judge" else None
         outcome = await self._refine(
             trigger=f"auto:{reason}",
             gate=judge is not None and judge.mode == "gate",
