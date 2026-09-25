@@ -4,6 +4,7 @@
 #   uv run vf-eval @ configs/swe_off.toml
 model = "deepseek/deepseek-v4.1-flash"
 num_rollouts = 2
+num_tasks = 5
 
 [env.taskset]
 id = "rlm-refine-swebench-pro"
