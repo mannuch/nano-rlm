@@ -16,6 +16,7 @@ forward_env = ["TYPESAFE_API_KEY"]
 
 [env.agent.harness.policy]
 summarize_at_tokens = 80000
+delegation_prompt = true
 
 [env.agent.harness.harness]
 auto_refine = true

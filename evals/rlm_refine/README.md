@@ -112,6 +112,11 @@ task also allowlists `api.typesafe.ai`.
   25k, a few source files filled the context. The agent then re-read them after every
   compaction until it ran out of its 1M-token budget: two of three smoke tasks never got
   past this.
+- **Delegation guidance on:** the SWE configs set `delegation_prompt = true`. It adds
+  guidance on when to spawn child agents, how to brief them, and how to collect and
+  reconcile their results. Without it, no agent spawned a child in 811 TBLite rollouts or the
+  SWE smoke runs, so the judge's delegation-role signal and subagent specs never got used.
+  The TBLite configs leave it off.
 - **Configs:** the `swe_*.toml` configs run the 51-task HARD-51 subset (`subset = "hard51"`):
   - `configs/swe_smoke.toml`: 3 tasks, the judge gating
   - `configs/swe_off.toml`, `swe_planner.toml`, `swe_gate.toml`: the three arms, 2 rollouts
