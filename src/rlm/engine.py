@@ -29,6 +29,8 @@ from rlm.client import (
 )
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
+    RESERVE_TOKENS,
+    hollow_middle,
     TOOL_OUTPUT_MAX_BYTES,
     PINNED_PROMPT_NOTE,
     CompactionFailed,
@@ -1403,6 +1405,29 @@ class RLMEngine:
                 ) from error
             raise
 
+    @staticmethod
+    def _shorter_summary_input(
+        base: list[dict],
+        snapshot: list[dict] | None,
+        *,
+        prompt_tokens: int | None,
+        remove_tokens: int,
+    ) -> tuple[list[dict], list[dict] | None]:
+        """Hollow the summary input further. When hollowing cannot shrink it, try the last
+        good snapshot once (it fit the window when it was live, whatever its message count);
+        fail rather than resend an input unchanged."""
+        shorter = hollow_middle(
+            base, prompt_tokens=prompt_tokens, remove_tokens=remove_tokens
+        )
+        if shorter != base:
+            return shorter, snapshot
+        if snapshot is not None and snapshot != base:
+            return snapshot, None
+        raise CompactionFailed(
+            "summary input cannot be shortened further: the retained context alone "
+            "exceeds the model's window"
+        )
+
     async def _compact_branch(
         self,
         messages: list[dict],
@@ -1578,11 +1603,13 @@ class RLMEngine:
         self, messages: list[dict], checkpoint_prompt: str, compaction: Compaction
     ) -> tuple[str, TokenUsage]:
         """The handoff summary of the current branch, from the live context."""
-        # A rejected checkpoint falls back to the last good snapshot (which has a
-        # full reserve of room, so it fits); an incomplete, empty, or
+        # Only the summary request is shortened; the live context and ledger
+        # remain intact until a complete summary succeeds. An incomplete, empty, or
         # tool-calling reply is resampled. Reasoning is never part of the summary.
         base = messages
-        for _ in range(self.max_compaction_attempts):
+        snapshot: list[dict] | None = messages[: self._last_good]
+        for attempt in range(self.max_compaction_attempts):
+            last_attempt = attempt + 1 == self.max_compaction_attempts
             checkpoint = [
                 *base,
                 {"role": "user", "content": checkpoint_prompt},
@@ -1596,12 +1623,37 @@ class RLMEngine:
             except APIStatusError as e:
                 if not is_context_overflow(e):
                     raise
-                base = messages[: self._last_good]
+                if not last_attempt:
+                    base, snapshot = self._shorter_summary_input(
+                        base,
+                        snapshot,
+                        prompt_tokens=None,
+                        remove_tokens=RESERVE_TOKENS,
+                    )
                 continue
             text = _side_reply_text(response)
             if text:
                 return text, usage
             self._semantic_edges.release_summary_request(compaction.compaction_id)
+            if (
+                not last_attempt
+                and response.choices[0].finish_reason == "length"
+                and (
+                    self.summarize_at_tokens is None
+                    or usage.prompt_tokens >= self.summarize_at_tokens
+                )
+            ):
+                excess = (
+                    max(0, usage.prompt_tokens - self.summarize_at_tokens)
+                    if self.summarize_at_tokens is not None
+                    else RESERVE_TOKENS
+                )
+                base, snapshot = self._shorter_summary_input(
+                    base,
+                    snapshot,
+                    prompt_tokens=usage.prompt_tokens,
+                    remove_tokens=excess + 1024,
+                )
         raise CompactionFailed(
             f"no usable summary after {self.max_compaction_attempts} attempts"
         )
