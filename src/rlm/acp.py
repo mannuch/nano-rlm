@@ -39,7 +39,15 @@ from acp.schema import (
     TextContentBlock,
     Usage,
 )
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from typing_extensions import Self
 
 from rlm.engine import RLMEngine
 from rlm.config import (
@@ -57,6 +65,7 @@ CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 REFINE_METADATA_KEY = "ai.prime.rlm/refine-v1"
+REFINEMENTS_METADATA_KEY = "ai.prime.rlm/refinements-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
 
 
@@ -167,6 +176,16 @@ class _RefineRequest(_ContractModel):
     instructions: str | None = None
     global_: bool = Field(default=False, alias="global")
     rollback_id: str | None = None
+    review: bool = False
+    """Gate the refinement with the TypeSafe judge; a decline is the answer."""
+    focus: bool = False
+    """Have the TypeSafe judge write the refinement's focus instructions."""
+
+    @model_validator(mode="after")
+    def _rollback_is_unreviewed(self) -> Self:
+        if self.rollback_id is not None and (self.review or self.focus):
+            raise ValueError("a rollback takes no review or focus")
+        return self
 
 
 @dataclass
@@ -213,7 +232,11 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
 
 
 def _validation_fields(error: ValidationError) -> list[str]:
-    return [".".join(str(part) for part in item["loc"]) for item in error.errors()]
+    """Each error's field path; a whole-object error reports its message instead."""
+    return [
+        ".".join(str(part) for part in item["loc"]) or item["msg"]
+        for item in error.errors()
+    ]
 
 
 def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
@@ -327,6 +350,8 @@ def _refine_request(meta_kwargs: dict[str, Any]) -> dict[str, Any] | None:
         "instructions": payload.instructions,
         "global_": payload.global_,
         "rollback_id": payload.rollback_id,
+        "review": payload.review,
+        "focus": payload.focus,
     }
 
 
@@ -411,6 +436,17 @@ class RLMACPAgent(Agent):
         if refine is not None and not state.engine.runtime_config.harness.enabled:
             raise RequestError.invalid_params(
                 {"reason": f"{REFINE_METADATA_KEY} requires an enabled harness"}
+            )
+        if (
+            refine is not None
+            and (refine["review"] or refine["focus"])
+            and state.engine.runtime_config.harness.refine_judge is None
+        ):
+            raise RequestError.invalid_params(
+                {
+                    "reason": f"{REFINE_METADATA_KEY} review or focus by TypeSafe "
+                    "requires harness.refine_judge"
+                }
             )
         text = _prompt_text(prompt, allow_empty=refine is not None)
         async with state.lock:
@@ -505,7 +541,10 @@ class RLMACPAgent(Agent):
                 state.delivery_task.cancel()
             async with state.lock:
                 await state.engine.aclose()
-            return _session_metadata(state)
+            return {
+                **_session_metadata(state),
+                REFINEMENTS_METADATA_KEY: state.engine.refinement_records,
+            }
         finally:
             if self._sessions.get(session_id) is state:
                 self._sessions.pop(session_id)

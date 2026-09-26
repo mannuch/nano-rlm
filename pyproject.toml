@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "agent-client-protocol==0.12.1",
     "openai>=1.0",
+    "typesafe-sdk>=0.7.1",
     "ipykernel",
     "jupyter_client",
     "nest_asyncio",
@@ -43,6 +44,10 @@ dev = [
 gepa = [
     "gepa>=0.1.4,<0.2",
 ]
+
+[tool.ty.src]
+# evals/rlm_refine is its own uv project, type-checked against its own environment.
+exclude = ["evals/"]
 
 [tool.ruff]
 extend-exclude = ["scripts/gepa/workspace"]

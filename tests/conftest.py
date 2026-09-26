@@ -7,6 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -250,3 +251,35 @@ def install_fixture_skills():
             check=False,
             capture_output=True,
         )
+
+
+class FakeTypeSafe:
+    """Stands in for ``AsyncTypeSafeClient``: each ``system_one`` call pops one scripted
+    answer map (question id -> Noul probability, or a Choice answer dict); questions
+    missing from the map answer 0.0."""
+
+    def __init__(self, answers: list[dict[str, Any]]):
+        self.scripted = list(answers)
+        self.calls: list[tuple[dict, dict]] = []
+
+    async def system_one(self, state, questions, *, model=None):
+        self.calls.append((state, questions))
+        answers = self.scripted.pop(0)
+        nouls = {
+            k: SimpleNamespace(noul=answers.get(k, 0.0))
+            for k, q in questions.items()
+            if q.type == "noul"
+        }
+        choices = {
+            k: SimpleNamespace(**answers[k])
+            for k, q in questions.items()
+            if q.type == "choice" and k in answers
+        }
+        return SimpleNamespace(
+            nouls=nouls,
+            choices=choices,
+            usage=SimpleNamespace(input_tokens=10, output_tokens=0),
+        )
+
+    async def aclose(self) -> None:
+        pass

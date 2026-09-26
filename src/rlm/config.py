@@ -7,6 +7,8 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
@@ -54,6 +56,26 @@ class InvocationContext(_ConfigModel):
         return InvocationContext(depth=self.depth + 1, ancestor_harness_dirs=ancestors)
 
 
+class RefineJudgeConfig(_ConfigModel):
+    """TypeSafe System One judge for refinement reviews: typed yes/no signals decide
+    whether to refine and what the refinement should focus on; the task model still
+    plans the edits."""
+
+    api_key: str = Field(min_length=1, repr=False)
+    base_url: str | None = None
+    model: str = "jev-latest"
+    mode: Literal["gate", "shadow"] = "gate"
+    """``gate``: the judge replaces the model's auto-refine review. ``shadow``: the
+    model review still decides and the judge's verdict is only logged."""
+    threshold: float = Field(default=0.7, ge=0, le=1)
+    """Probability at which a gate signal fires or an entry is flagged."""
+    veto_threshold: float = Field(default=0.8, ge=0, le=1)
+    """Probability at which a fired lesson counts as already recorded."""
+    home_confidence: float = Field(default=0.6, ge=0, le=1)
+    """Choice confidence needed to name a single harness kind for a lesson."""
+    timeout_s: float = Field(default=30.0, gt=0)
+
+
 class HarnessConfig(_ConfigModel):
     """Continual harness: durable prompt notes, memories, skill descriptions and
     sub-agent specs rendered into the system prompt as a compact block."""
@@ -68,12 +90,20 @@ class HarnessConfig(_ConfigModel):
     auto_refine: bool = False
     """Let the root engine review its own trajectory every ``refine_turn_interval``
     work turns (and after each compaction) and refine when the review approves."""
+    auto_refine_review: Literal["judge", "planner"] = "judge"
+    """Who decides an automatic pass. ``judge`` needs ``refine_judge`` whenever
+    ``auto_refine`` is on, and the judge's ``mode`` gates or shadows the planning call.
+    ``planner`` leaves the decision to the task model alone and never consults the
+    judge, e.g. for a baseline without it."""
     refine_turn_interval: int = Field(default=12, gt=0)
     refine_cooldown_seconds: int = Field(default=300, ge=0)
     max_refinements: int | None = Field(default=None, gt=0)
     """Refinement passes per engine before further requests are declined."""
     max_refinement_attempts: int = Field(default=3, gt=0)
     """Proposal attempts within one pass; an unusable reply is resampled."""
+    refine_judge: RefineJudgeConfig | None = None
+    """TypeSafe judge for auto-refine reviews and host-requested reviews. Required by
+    ``auto_refine`` unless ``auto_refine_review`` is ``planner``."""
     skills_dir: str | None = None
     """Persistent directory of agent-authored skill packages, put on the kernel's
     sys.path at start. None (default) keeps authored packages session-local."""
@@ -82,6 +112,19 @@ class HarnessConfig(_ConfigModel):
     the task, the coarsest compaction blocks, the outcome and the session directory.
     Requires ``global_dir``. Off by default because a global store shared across RL
     rollouts would let one rollout read another's outcome."""
+
+    @model_validator(mode="after")
+    def _validate_auto_refine_review(self) -> Self:
+        if (
+            self.auto_refine
+            and self.auto_refine_review == "judge"
+            and self.refine_judge is None
+        ):
+            raise ValueError(
+                "auto_refine needs refine_judge; set auto_refine_review to "
+                "'planner' to let the task model decide automatic passes alone"
+            )
+        return self
 
 
 class ExecutionPolicy(_ConfigModel):

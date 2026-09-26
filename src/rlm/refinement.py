@@ -106,15 +106,13 @@ GLOBAL_SCOPE_POLICY = (
     "blockers or current-run coordination globally."
 )
 
-REVIEW_PROMPT = """Decide whether this checkpoint should run a continual-harness refinement (trigger:
-%(trigger)s; %(turns)d work turns since the last review). A refinement writes local
-harness state by default: approve when the conversation and any compaction blocks since
-the last review contain evidence useful to this session's future turns (a repeated
-failure, a reusable tactic, a repeated delegation role, a durable fact or preference, a
-user correction). Reject one-off noise, unsupported hypotheses and transient tool output.
-Do not call tools. Reply with JSON only:
-
-{"should_refine": true|false, "rationale": "short reason", "instructions": "optional focus for the refinement"}"""
+AUTO_REFINE_NOTE = """This pass was started automatically (%(trigger)s; %(turns)d work turns
+since the last automatic pass), not requested. Edit only on evidence in the conversation
+and any compaction blocks since then that will help this session's future turns: a
+repeated failure, a reusable tactic, a repeated delegation role, a durable fact or
+preference, a user correction. One-off noise, unsupported hypotheses and transient tool
+output are not evidence. When nothing qualifies, return an empty edits array with a
+rationale: that declines the pass and changes nothing."""
 
 BLOCKS_NOTE = (
     "A compaction just closed a branch. These are the blocks it produced; the staircase "
@@ -228,9 +226,11 @@ def refine_prompt(
     instructions: str | None,
     importable_names: list[str],
     evidence: list[Block] | None = None,
+    auto_note: str | None = None,
     template: str = REFINE_PROMPT,
 ) -> str:
-    """The user message appended to the live conversation for a planning call."""
+    """The user message appended to the live conversation for a planning call.
+    ``auto_note`` tells an automatic pass when not to edit."""
     parts = [
         template
         % {
@@ -244,27 +244,10 @@ def refine_prompt(
     ]
     if evidence:
         parts.append(blocks_section("evidence", evidence))
+    if auto_note:
+        parts.append(f"<automatic_refinement>\n{auto_note}\n</automatic_refinement>")
     if instructions:
         parts.append(f"<refine_instructions>\n{instructions}\n</refine_instructions>")
-    return "\n\n".join(parts)
-
-
-def review_prompt(
-    view: HarnessView,
-    history: list[RefinementResult],
-    *,
-    trigger: str,
-    turns_since_review: int,
-    blocks: list[Block] | None = None,
-    template: str = REVIEW_PROMPT,
-) -> str:
-    parts = [
-        template % {"trigger": trigger, "turns": turns_since_review},
-        f"<current_harness_state>\n{view.overview(max_entries_per_kind=20)}\n</current_harness_state>",
-        f"<refinement_history>\n{history_for_prompt(history)}\n</refinement_history>",
-    ]
-    if blocks:
-        parts.append(blocks_section("compaction_blocks", blocks))
     return "\n\n".join(parts)
 
 
@@ -368,16 +351,6 @@ def parse_proposal(text: str) -> RefinementProposal:
         rationale=_text(value.get("rationale")) or "",
         expected_outcome=_text(value.get("expected_outcome")) or "",
         edits=edits,
-    )
-
-
-def parse_review(text: str) -> tuple[bool, str, str | None]:
-    """``(should_refine, rationale, instructions)`` from an auto-refine review reply."""
-    value = extract_json_object(text)
-    return (
-        value.get("should_refine") is True,
-        _text(value.get("rationale")) or "no rationale",
-        _text(value.get("instructions")),
     )
 
 
@@ -633,9 +606,7 @@ __all__ = [
     "load_history",
     "notice_text",
     "parse_proposal",
-    "parse_review",
     "refine_prompt",
-    "review_prompt",
     "rollback_proposal",
     "validate_edit",
 ]

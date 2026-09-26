@@ -1,0 +1,26 @@
+# Reward comparison, arm "planner": auto-refinement on, the planner (task model) deciding every pass.
+# The three ab_*.toml configs differ only in [env.agent.harness.harness].
+#
+#   uv run vf-eval @ configs/ab_planner.toml
+model = "deepseek/deepseek-v4.1-flash"
+num_rollouts = 3
+
+[env.taskset]
+id = "rlm-refine"
+
+[env.agent.harness]
+id = "rlm-refine"
+version = "110ec934e0231ed12aea909c0b985d1cadd90baa"
+forward_env = ["TYPESAFE_API_KEY"]
+
+[env.agent.harness.policy]
+summarize_at_tokens = 25000
+
+[env.agent.harness.harness]
+auto_refine = true
+auto_refine_review = "planner"   # no judge: the task model decides every pass
+refine_turn_interval = 8
+refine_cooldown_seconds = 0
+
+[env.agent.runtime]
+type = "prime"

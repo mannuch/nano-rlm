@@ -59,7 +59,8 @@ fall back to process environment configuration.
 Credentials travel over the private ACP stdio channel and are never echoed.
 The `session/close` response carries one authoritative, credential-free
 snapshot of cumulative usage, metrics, tool-call stats, supervisor counters,
-and limits under `ai.prime.rlm/session-v1`.
+and limits under `ai.prime.rlm/session-v1`, and the session's refinement passes
+(applied or declined, with any judge verdict) under `ai.prime.rlm/refinements-v1`.
 
 Every actual model call carries a standard HTTP `Idempotency-Key` header that
 stays stable across SDK and outer retries (retry attempts are distinguished by
@@ -102,10 +103,10 @@ agent identity metadata.
 are the keys of `rlm.prompt.DEFAULT_PROMPTS`: the system prompt's `task` line and the
 `repl_doctrine` and `delegation_doctrine` paragraphs; the reference sections they sit in
 (`runtime_reference`, `delegation_reference`, `history`, `harness_api`); the compaction
-texts `checkpoint`, `rollup` and `staircase_framing`; and the refinement texts `review`
-and `refine`. Unknown names and empty texts are rejected, as is a text that drops a marker
-the runtime fills in (`<repl_doctrine>` inside `runtime_reference`, `%(trigger)s` in
-`review`, ...). `system_prompt_path` still replaces the task role entirely. The
+texts `checkpoint`, `rollup` and `staircase_framing`; and the refinement planning text
+`refine`. Unknown names and empty texts are rejected, as is a text that drops a marker
+the runtime fills in (`<repl_doctrine>` inside `runtime_reference`, `%(scope_policy)s`
+in `refine`, ...). `system_prompt_path` still replaces the task role entirely. The
 `session/close` snapshot lists the overridden names under `limits.prompt_overrides`.
 
 The generated guide distinguishes Python state from supervisor-owned resources,
@@ -412,10 +413,12 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "max_prompt_content_chars": 180,
   "max_prompt_refinements": 5,
   "auto_refine": false,
+  "auto_refine_review": "judge",
   "refine_turn_interval": 12,
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
   "max_refinement_attempts": 3,
+  "refine_judge": null,
   "skills_dir": null,
   "record_episodes": false
 }
@@ -548,33 +551,108 @@ changed while planning, …) are recorded with an error and the rest still apply
 store's `refinements.jsonl` holds one full result per pass with per-edit `before`/`after`
 snapshots; a rollback replays those snapshots in reverse and needs no model call.
 
+The planning call also decides whether to refine at all: a proposal with an empty `edits`
+array declines the pass. A declined pass changes nothing (no store write, no rebuilt
+window, no `refinement` edge) and is recorded as a `refinement_declined` ledger record with
+the planner's rationale; only a kernel-requested pass tells the model, in context. An
+applied pass is a `refinement` record. Both records carry the `trigger`, any compaction
+`blocks` behind the pass and, when the TypeSafe judge ran, its verdict under `judge`.
+
 Three triggers, all of which run between model calls and never inside a cell:
 
 - **Kernel**: `await rlm.refine.run(instructions=None, global_=False, rollback_id=None)`
   returns `{"scheduled": True}` (or a reason) and the pass runs at the next boundary;
   `await rlm.refine.status()` reports `pending`/`in_flight`.
 - **Host**: `session/prompt` may carry `ai.prime.rlm/refine-v1` in `_meta`:
-  `{"instructions": "...", "global": false, "rollback_id": null}`. The pass runs before
-  the turn; with an empty prompt it is the whole turn and the notice is the answer
-  (`stop_reason` `refined`). The key is refused when the harness is disabled.
+  `{"instructions": "...", "global": false, "rollback_id": null, "review": false, "focus": false}`.
+  The pass runs before the turn; with an empty prompt it is the whole turn and the notice
+  (or `[refinement declined: <rationale>]`) is the answer (`stop_reason` `refined`).
+  `review: true` lets the TypeSafe judge decline the pass before any model call;
+  `focus` has the judge write the plan's focus instructions, with any host `instructions`
+  appended after them. A rollback takes neither. The key is refused when the harness is
+  disabled, and `review` or `focus` is refused without `refine_judge`.
 - **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
-  work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
-  review call decides whether the trajectory holds evidence worth persisting; only an
-  approving review triggers a plan. After a compaction the review also receives the blocks
-  that compaction produced (the branch summary and any rollups it sealed) as a
-  `<compaction_blocks>` section, with the hint that a failure, tactic or fact recurring
-  across blocks is evidence for a durable entry while one branch's progress is not; an
-  approved review hands the same blocks to the plan as `<evidence>`. Both are side calls
-  with `tool_choice="none"`, so the evidence is the block text itself, never a pointer to
-  follow. The `refinement_review` ledger record lists the block keys.
+  work turns and after each compaction, subject to `refine_cooldown_seconds`, the TypeSafe
+  judge reviews the pass (see below) and, unless it declines, a planning
+  call runs with an `<automatic_refinement>` section: the pass was not requested, so edit
+  only on evidence useful to this session's future turns (a repeated failure, a reusable
+  tactic, a repeated delegation role, a durable fact or preference, a user correction) and
+  otherwise decline with no edits. After a compaction the plan also receives the blocks that
+  compaction produced (the branch summary and any rollups it sealed) as `<evidence>`, with
+  the hint that a failure, tactic or fact recurring across blocks is evidence for a durable
+  entry while one branch's progress is not. The call runs with `tool_choice="none"`, so the
+  evidence is the block text itself, never a pointer to follow.
 
-`max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
-unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
-reported as failed in the conversation and the run continues. Plan and review calls carry
-`refinement_attempt` semantic edges from the last work request; the applied plan request
-becomes the source of a `refinement` edge into the next work request, which also keeps its
-ordinary `continuation` edge. Refinement counts and edit totals appear in the session
-metrics; the `session-v1` snapshot carries per-scope entry counts under `harness`.
+#### TypeSafe review judge
+
+`refine_judge` puts TypeSafe's System One model (Jev) in front of the planning call. Jev
+answers typed yes/no and choice questions with calibrated probabilities; the task model
+still writes the plan and may still decline it. Automatic passes need the judge:
+`auto_refine` without `refine_judge` fails validation at `session/new`. Only
+`auto_refine_review: "planner"` lets the task model decide automatic passes alone, with
+no judge call, e.g. as a baseline. For host passes the judge stays opt-in (`review`,
+`focus`). It runs for the root agent only and sends a compact evidence state to the TypeSafe API: the messages since the last pass
+(clipped, newest first, user turns kept ahead of the rest), exception counts, the
+compaction blocks behind the pass, and the visible harness entries with the entries of
+the store the pass writes first, alongside that store's refinement history.
+
+```json
+"refine_judge": {
+  "api_key": "...",
+  "base_url": null,
+  "model": "jev-latest",
+  "mode": "gate",
+  "threshold": 0.7,
+  "veto_threshold": 0.8,
+  "home_confidence": 0.6,
+  "timeout_s": 30.0
+}
+```
+
+A review is two calls. The **gate** asks one yes/no question per kind of lesson
+(repeated failure, reusable tactic, delegation role, durable fact, user correction, and,
+in a local pass a compaction started, working notes: state from the turns just
+summarized away that the rest of the task still needs) and one per entry the pass could
+fix: is it contradicted by the conversation? That covers
+entries of the store the pass writes and, in a local pass, read-only global or ancestor
+entries, which get a local override. Nothing at `threshold` declines after that one
+call. The **focus** call is asked only about the lessons that fired, stated as
+premises: per lesson, whether it is already recorded (a veto at `veto_threshold`) and
+which kind should hold it; per entry of the store the pass writes, whether it covers a
+lesson; per turn, whether it is direct evidence. Questions are worded
+for the pass's scope: a local pass serves later work in this session (the rest of the
+current task, which may continue after older turns are summarized away, and any later
+tasks), a global pass (host `global: true`) future sessions. A fact or technique that
+served only a step already finished doesn't count. Code turns the answers into deterministic plan
+instructions naming the home kind (one kind when the choice's confidence reaches
+`home_confidence`), the entries to update or delete, the read-only entries a local entry
+should override, and quotes of the strongest turns.
+They reach the planner as `<refine_instructions>`, the same slot host and kernel
+instructions use.
+
+`mode: "gate"` lets the judge decline automatic passes before any model call; `"shadow"`
+leaves the decision to the planner and only records the judge's verdict. The pass record's
+`judge` holds the mode, the gate and focus probabilities, the evidence turns it chose and
+TypeSafe token usage per call. A judge failure fails a gated pass; where the judge only
+informs the plan (`focus`, `shadow`) the plan runs without it and the failure is recorded
+as `judge.error`. `scripts/refine_eval/run.py` scores these pieces on labeled, steered
+scenarios: decisions against labels, who declined, focus against expected kinds and
+entries, and applied edits and follow-up probes per arm (`force`, `force+focus`,
+`typesafe`, `none`). Scenarios can seed either store and run a global pass, covering a
+stale global entry, a global entry a local pass must override, and a session-only fact
+a global pass should decline. `scripts/refine_eval/RUNBOOK.md` covers running it and
+reading the report.
+
+`max_refinements` caps applied passes per engine; `max_refinement_attempts` bounds how
+often an unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
+reported as failed in the conversation and the run continues. A pass is one planning
+request (plus any resampled attempts), each carrying a `refinement_attempt` semantic edge
+from the last work request; an applied plan becomes the source of a `refinement` edge into
+the next work request, which also keeps its ordinary `continuation` edge. A declined plan
+is a dead end, and a pass the judge declines makes no request at all. Refinement counts,
+edit totals, declines by reason and the judge's reviews, errors, input tokens and
+disagreements with the planner appear in the session metrics; the `session-v1` snapshot
+carries per-scope entry counts under `harness`.
 
 ### Episodes
 
@@ -717,7 +795,9 @@ Each call connects using the configured transport, invokes the tool, and returns
 
 The IPython kernel always runs in rlm's own Python (`sys.executable`). `install.sh` puts `rlm` and all discovered skills into the same `uv tool install` environment, so `from rlm import run`, `import edit`, etc. work natively from inside an IPython cell.
 
-The kernel starts from a small platform environment (`PATH`, home/user/shell, locale, temporary-directory, certificate, and virtual-environment variables) plus the contract's explicit `kernel_env` mapping. It receives private Jupyter/IPython config directories and does not inherit the rest of the supervisor process environment. This de-ambients credentials; it is not hostile-code containment because the kernel still shares the sandbox user, filesystem, process namespace, and network with the supervisor.
+The kernel inherits the supervisor's environment minus variables that would redirect its interpreter or config (`PYTHONHOME`, `UV_PYTHON`, `CONDA_PREFIX`, `PIP_TARGET`, …), provider and infrastructure prefixes (`OPENAI_`, `PRIME_`, `RLM_`, `AWS_`, `GITHUB_`, …) and anything that looks like a credential by name or by a `user:pass@` URL, plus the contract's explicit `kernel_env` mapping. Platform variables (`PATH`, home/user/shell, locale, temporary-directory, certificate, and `VIRTUAL_ENV`) always pass. It receives private Jupyter/IPython config directories. This de-ambients credentials as far as those patterns reach; it is not hostile-code containment because the kernel still shares the sandbox user, filesystem, process namespace, and network with the supervisor.
+
+To add a package to the kernel itself, install it into rlm's interpreter explicitly: `!uv pip install --python {sys.executable} <pkg>`. A bare `uv pip install` picks its target from `VIRTUAL_ENV` or a nearby `.venv`, so under `uv tool install` (as in sandboxes) it finds no environment or, worse, the project's.
 
 To exercise packages from the target project's `.venv` (e.g. running its test suite), shell out from an IPython cell: `!./.venv/bin/python3 -m pytest`. The kernel itself stays isolated from whatever project venv the agent is working on — no cross-cell state involving sandbox packages.
 

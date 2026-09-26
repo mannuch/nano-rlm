@@ -39,6 +39,15 @@ class CompactionApplied:
 
 
 @dataclass(frozen=True)
+class RefinementJudged:
+    """The TypeSafe judge's part in one refinement pass."""
+
+    would_refine: bool | None
+    """The judge's own gate decision; None when the judge failed."""
+    input_tokens: int
+
+
+@dataclass(frozen=True)
 class RefinementApplied:
     """Emitted when a continual-harness refinement pass finishes."""
 
@@ -46,10 +55,24 @@ class RefinementApplied:
     edits_applied: int
     edits_rejected: int
     review_only: bool = False
-    """True for an auto-refine review that decided not to refine."""
+    """True for the record of an automatic pass reaching a decision, applied or
+    declined; counted as ``num_auto_refine_reviews``."""
+    judge: RefinementJudged | None = None
 
 
-BuiltinMetricEvent = IpythonExecuted | CompactionApplied | RefinementApplied
+@dataclass(frozen=True)
+class RefinementDeclined:
+    """Emitted when a refinement pass changes nothing."""
+
+    trigger: str
+    reason: str
+    """``gate``, ``no_edits``, ``limit`` or ``failed``."""
+    judge: RefinementJudged | None = None
+
+
+BuiltinMetricEvent = (
+    IpythonExecuted | CompactionApplied | RefinementApplied | RefinementDeclined
+)
 
 
 @dataclass
@@ -187,6 +210,19 @@ class RLMMetrics:
     refinement_edits_applied: int = 0
     refinement_edits_rejected: int = 0
     num_auto_refine_reviews: int = 0
+    num_refinements_declined_gate: int = 0
+    num_refinements_declined_no_edits: int = 0
+    num_refinements_declined_limit: int = 0
+    num_refinements_failed: int = 0
+
+    # TypeSafe refinement judge (its calls never reach the API proxy).
+    num_judge_reviews: int = 0
+    num_judge_errors: int = 0
+    judge_input_tokens: int = 0
+    num_judge_would_decline_applied: int = 0
+    """Passes that applied edits although the judge would have declined them."""
+    num_judge_would_refine_declined: int = 0
+    """Passes the planner declined although the judge would have refined."""
 
     stop_reason: str = ""
 
@@ -228,10 +264,36 @@ class RLMMetrics:
                 self.num_refinements += 1
                 self.refinement_edits_applied += event.edits_applied
                 self.refinement_edits_rejected += event.edits_rejected
+                self._record_judge(event.judge)
+                if event.judge is not None and event.judge.would_refine is False:
+                    self.num_judge_would_decline_applied += 1
+        elif isinstance(event, RefinementDeclined):
+            if event.reason == "gate":
+                self.num_refinements_declined_gate += 1
+            elif event.reason == "no_edits":
+                self.num_refinements_declined_no_edits += 1
+            elif event.reason == "limit":
+                self.num_refinements_declined_limit += 1
+            else:
+                self.num_refinements_failed += 1
+            self._record_judge(event.judge)
+            if (
+                event.reason == "no_edits"
+                and event.judge is not None
+                and event.judge.would_refine
+            ):
+                self.num_judge_would_refine_declined += 1
         else:
             raise TypeError(f"Unsupported builtin metric event: {type(event)!r}")
 
         self._refresh_derived_metrics()
+
+    def _record_judge(self, judge: RefinementJudged | None) -> None:
+        if judge is None:
+            return
+        self.num_judge_reviews += 1
+        self.num_judge_errors += judge.would_refine is None
+        self.judge_input_tokens += judge.input_tokens
 
     def _refresh_derived_metrics(self) -> None:
         if self._ipython_call_count:

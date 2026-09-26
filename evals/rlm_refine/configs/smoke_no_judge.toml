@@ -1,0 +1,28 @@
+# Expected to fail: one OpenThoughts TBLite task with auto-refinement on but no judge and
+# no `auto_refine_review = "planner"` opt-out. nano-rlm rejects the harness table at
+# `session/new` ("auto_refine needs refine_judge"), so the rollout errors before any model
+# call. The trace shows only `RequestError: Invalid params`: verifiers doesn't pass on the
+# reason for a `session/new` error.
+#
+#   uv run vf-eval @ configs/smoke_no_judge.toml
+model = "deepseek/deepseek-v4.1-flash"
+num_rollouts = 1
+num_tasks = 1
+
+[env.taskset]
+id = "rlm-refine"
+
+[env.agent.harness]
+id = "rlm-refine"
+version = "110ec934e0231ed12aea909c0b985d1cadd90baa"
+
+[env.agent.harness.policy]
+summarize_at_tokens = 25000
+
+[env.agent.harness.harness]
+auto_refine = true
+refine_turn_interval = 8
+refine_cooldown_seconds = 0
+
+[env.agent.runtime]
+type = "prime"

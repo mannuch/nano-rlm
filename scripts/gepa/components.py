@@ -134,7 +134,6 @@ ROLES: dict[str, str] = {
         "the sentence(s) that open the compaction message the agent sees after its context "
         "was compacted, before the block summaries"
     ),
-    "review": "the JSON-only side-call prompt deciding whether a refinement should run",
     "refine": "the planning prompt for a harness refinement",
 }
 

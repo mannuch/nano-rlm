@@ -19,6 +19,7 @@ from rlm.acp import (
     ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     REFINE_METADATA_KEY,
+    REFINEMENTS_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
     RLMACPAgent,
@@ -107,6 +108,7 @@ class _Engine:
         self.prompt_started = asyncio.Event()
         self.closed = False
         self.stop_reason = "done"
+        self.refinement_records = [{"type": "refinement_declined", "reason": "gate"}]
         self.instances.append(self)
 
     async def prompt(self, prompt: str, *, refine: dict | None = None) -> RLMResult:
@@ -919,9 +921,35 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
     engine = _Engine.instances[0]
     assert engine.prompts == ["", "work"]
     assert engine.refines == [
-        {"instructions": "focus", "global_": True, "rollback_id": None},
+        {
+            "instructions": "focus",
+            "global_": True,
+            "rollback_id": None,
+            "review": False,
+            "focus": False,
+        },
         None,
     ]
+    with pytest.raises(RequestError) as rejected:
+        await agent.prompt(
+            created.session_id,
+            [text_block("")],
+            **{REFINE_METADATA_KEY: {"review": "typesafe"}},
+        )
+    assert "review" in str(rejected.value.data)
+    with pytest.raises(RequestError) as rejected:
+        await agent.prompt(
+            created.session_id,
+            [text_block("")],
+            **{REFINE_METADATA_KEY: {"rollback_id": "r1", "focus": True}},
+        )
+    assert "rollback" in str(rejected.value.data)
+    for request in ({"review": True}, {"focus": True}):
+        with pytest.raises(RequestError) as rejected:
+            await agent.prompt(
+                created.session_id, [text_block("")], **{REFINE_METADATA_KEY: request}
+            )
+        assert "requires harness.refine_judge" in str(rejected.value.data)
     with pytest.raises(RequestError) as rejected:
         await agent.prompt(
             created.session_id,
@@ -942,6 +970,23 @@ async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
         )
     assert "requires an enabled harness" in str(refused.value.data)
     await agent.close_session(disabled.session_id)
+
+    judged = await agent.new_session(
+        str(tmp_path), **_runtime_metadata(harness={"refine_judge": {"api_key": "k"}})
+    )
+    await agent.prompt(
+        judged.session_id,
+        [text_block("")],
+        **{REFINE_METADATA_KEY: {"review": True, "focus": True}},
+    )
+    assert _Engine.instances[-1].refines[-1] == {
+        "instructions": None,
+        "global_": False,
+        "rollback_id": None,
+        "review": True,
+        "focus": True,
+    }
+    await agent.close_session(judged.session_id)
 
 
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
@@ -1018,6 +1063,8 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert closed_snapshot["last_stop_reason"] == "done"
     assert "semantic_edges" not in closed_snapshot
     assert closed.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
+    assert closed.field_meta[REFINEMENTS_METADATA_KEY] == engine.refinement_records
+    assert REFINEMENTS_METADATA_KEY not in second.field_meta
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
 

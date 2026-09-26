@@ -10,12 +10,15 @@ from conftest import (
     DummyClient,
     DummyMessage,
     DummyToolCall,
+    FakeTypeSafe,
     make_runtime_config,
     tool_result,
 )
+from pydantic import ValidationError
 
-from rlm.config import ExecutionPolicy, HarnessConfig
+from rlm.config import ExecutionPolicy, HarnessConfig, RefineJudgeConfig
 from rlm.engine import RLMEngine
+from rlm.refine_judge import RefineJudge
 from rlm.harness import HarnessStore, build_view, local_dir
 from rlm.history import read_records
 from rlm.refinement import (
@@ -27,8 +30,7 @@ from rlm.refinement import (
     find_result,
     load_history,
     parse_proposal,
-    parse_review,
-    review_prompt,
+    refine_prompt,
     rollback_proposal,
 )
 from rlm.staircase import Block
@@ -58,12 +60,6 @@ def test_extract_json_object_handles_fences_prose_and_truncation():
         extract_json_object("no json here")
     with pytest.raises(RefinementRejected, match="no edits array"):
         parse_proposal('{"summary": "x"}')
-    assert parse_review('{"should_refine": true, "rationale": "r"}') == (
-        True,
-        "r",
-        None,
-    )
-    assert parse_review('{"should_refine": "yes"}')[0] is False
 
 
 def test_apply_proposal_validates_each_edit_and_records_snapshots(tmp_path):
@@ -296,6 +292,36 @@ async def test_kernel_requested_refinement_runs_at_the_turn_boundary(session):
     assert engine.execution_snapshot()["harness"]["local"]["memory"] == 1
 
 
+async def test_kernel_requested_pass_declined_by_the_planner_tells_the_model(session):
+    """An empty plan changes nothing: no rebuilt window, no ``refinement`` edge; the
+    model that asked hears why."""
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall("ipython", {"code": "await rlm.refine.run()"})
+                ]
+            ),
+            DummyMessage(content=_proposal([], rationale="nothing reusable yet")),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
+
+    assert (await engine.run("learn")).answer == "done"
+    notice = client.calls[2]["messages"][-1]["content"]
+    assert 'kind="refinement"' in notice
+    assert "Refinement declined: nothing reusable yet" in notice
+    [declined] = _records(session, "refinement_declined")
+    assert (declined["trigger"], declined["reason"]) == ("kernel", "no_edits")
+    assert [w["reason"] for w in _records(session, "context_window")] == ["start"]
+    edges = _edges(engine)
+    assert edges.count("refinement_attempt") == 1 and "refinement" not in edges
+    assert engine.execution_snapshot()["metrics"]["num_refinements"] == 0
+
+
 async def test_refinement_failure_is_reported_and_the_run_continues(session):
     client = DummyClient(
         [
@@ -403,81 +429,256 @@ async def test_host_refinement_and_rollback(session, tmp_path):
         )
 
 
-async def test_auto_refine_reviews_on_interval_and_only_refines_when_approved(session):
+LESSON = {"action": "create", "kind": "memory", "title": "Lesson", "content": "learned"}
+
+
+def _edges(engine) -> list[str]:
+    return [e["type"] for e in engine.execution_snapshot()["semantic_edges"]["edges"]]
+
+
+async def test_auto_refine_plans_on_interval_and_an_empty_plan_declines(session):
+    """Each automatic pass is one planning call; a plan with no edits declines it
+    without touching the store, the context or the next request's edges."""
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
             DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "2"})]),
-            # Review after 2 work turns: declined.
-            DummyMessage(content='{"should_refine": false, "rationale": "noise"}'),
+            # Pass after 2 work turns: nothing worth keeping.
+            DummyMessage(content=_proposal([], rationale="noise")),
             DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "3"})]),
             DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "4"})]),
-            # Review after 2 more: approved, then the plan.
-            DummyMessage(
-                content='{"should_refine": true, "rationale": "lesson", "instructions": "record it"}'
-            ),
-            DummyMessage(
-                content=_proposal(
-                    [
-                        {
-                            "action": "create",
-                            "kind": "memory",
-                            "title": "Lesson",
-                            "content": "learned",
-                        }
-                    ]
-                )
-            ),
+            # Pass after 2 more: a lesson.
+            DummyMessage(content=_proposal([LESSON])),
             DummyMessage(content="done"),
         ]
     )
     config = make_runtime_config(
         harness=HarnessConfig(
-            auto_refine=True, refine_turn_interval=2, refine_cooldown_seconds=0
+            auto_refine=True,
+            auto_refine_review="planner",
+            refine_turn_interval=2,
+            refine_cooldown_seconds=0,
         )
     )
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
     result = await engine.run("go")
 
-    assert result.answer == "done" and result.turns == 5
-    review_calls = [client.calls[2], client.calls[5]]
-    for call in review_calls:
+    assert result.answer == "done" and result.turns == 5 and len(client.calls) == 7
+    for call in (client.calls[2], client.calls[5]):
+        plan = call["messages"][-1]["content"]
         assert call["tool_choice"] == "none"
-        assert (
-            "should run a continual-harness refinement"
-            in call["messages"][-1]["content"]
-        )
-    assert (
-        "2 work turns since the last review"
-        in client.calls[2]["messages"][-1]["content"]
+        assert "improve the continual harness" in plan
+        assert "<automatic_refinement>" in plan and "auto:turn_interval" in plan
+    assert "2 work turns" in client.calls[2]["messages"][-1]["content"]
+    [declined] = _records(session, "refinement_declined")
+    assert (declined["trigger"], declined["reason"], declined["rationale"]) == (
+        "auto:turn_interval",
+        "no_edits",
+        "noise",
     )
-    plan = client.calls[6]["messages"][-1]["content"]
-    assert plan.endswith("<refine_instructions>\nrecord it\n</refine_instructions>")
-    reviews = _records(session, "refinement_review")
-    assert [(r["reason"], r["should_refine"]) for r in reviews] == [
-        ("turn_interval", False),
-        ("turn_interval", True),
-    ]
+    assert "message" not in declined and len(declined["request_ids"]) == 1
+    assert not any(
+        "Refinement declined" in str(m.get("content"))
+        for m in client.calls[3]["messages"]
+    )
     assert _records(session, "refinement")[0]["trigger"] == "auto:turn_interval"
+    assert len(load_history(HarnessStore(local_dir(session.dir)))) == 1
     metrics = engine.execution_snapshot()["metrics"]
     assert metrics["num_auto_refine_reviews"] == 2 and metrics["num_refinements"] == 1
-    types = sorted(
-        e["type"] for e in engine.execution_snapshot()["semantic_edges"]["edges"]
+    edges = _edges(engine)
+    assert edges.count("refinement_attempt") == 2 and edges.count("refinement") == 1
+
+
+HOME_MEMORY = {"choice": "memory", "confidence": 0.9, "probabilities": {"memory": 0.9}}
+
+
+def _judged_engine(
+    client, session, answers, *, auto_refine=True, global_dir=None, **judge
+):
+    config = make_runtime_config(
+        harness=HarnessConfig(
+            auto_refine=auto_refine,
+            global_dir=global_dir,
+            refine_turn_interval=1,
+            refine_cooldown_seconds=0,
+            refine_judge=RefineJudgeConfig(api_key="k", **judge),
+        )
     )
-    assert types.count("refinement_attempt") == 3 and types.count("refinement") == 1
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+    fake = FakeTypeSafe(answers)
+    engine._refine_judge = RefineJudge(config.harness.refine_judge, client=fake)
+    return engine, fake
 
 
-async def test_auto_refine_after_compaction_reviews_the_new_blocks(session):
+async def test_typesafe_gate_decides_before_the_planning_call(session):
+    """An approving judge hands its focus to the one planning call; a declining one
+    costs no model call and leaves no request in the edge graph."""
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content=_proposal([LESSON])),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "2"})]),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine, fake = _judged_engine(
+        client,
+        session,
+        [{"user_correction": 0.9}, {"home_user_correction": HOME_MEMORY}, {}],
+    )
+
+    result = await engine.run("go")
+
+    assert result.answer == "done" and len(client.calls) == 4
+    plan = client.calls[1]["messages"][-1]["content"]
+    assert "Focus from the refinement review" in plan
+    assert "Record it as a memory." in plan
+    assert len(fake.calls) == 3
+    assert [t["index"] for t in fake.calls[2][0]["turns"]][0] > max(
+        t["index"] for t in fake.calls[0][0]["turns"]
+    )
+    [applied] = _records(session, "refinement")
+    assert applied["judge"]["mode"] == "gate"
+    assert applied["judge"]["usage"].keys() == {"gate", "focus"}
+    [declined] = _records(session, "refinement_declined")
+    assert declined["reason"] == "gate" and declined["judge"]["focus"] is None
+    assert "message" not in declined
+    metrics = engine.execution_snapshot()["metrics"]
+    assert metrics["num_auto_refine_reviews"] == 2 and metrics["num_refinements"] == 1
+    assert metrics["num_refinements_declined_gate"] == 1
+    assert (metrics["num_judge_reviews"], metrics["judge_input_tokens"]) == (2, 30)
+    assert metrics["num_judge_would_decline_applied"] == 0
+    assert [r["type"] for r in engine.refinement_records] == [
+        "refinement",
+        "refinement_declined",
+    ]
+    assert "rebuilt_window" not in engine.refinement_records[0]
+    edges = _edges(engine)
+    assert edges.count("refinement_attempt") == 1 and edges.count("refinement") == 1
+
+
+async def test_shadow_judge_is_logged_beside_the_deciding_plan(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+            DummyMessage(content=_proposal([], rationale="noise")),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine, _ = _judged_engine(
+        client,
+        session,
+        [{"user_correction": 0.9}, {"home_user_correction": HOME_MEMORY}],
+        mode="shadow",
+    )
+
+    assert (await engine.run("go")).answer == "done"
+    assert (
+        "Focus from the refinement review"
+        not in (client.calls[1]["messages"][-1]["content"])
+    )
+    [declined] = _records(session, "refinement_declined")
+    assert declined["reason"] == "no_edits"
+    assert declined["judge"]["mode"] == "shadow"
+    assert declined["judge"]["gate_decision"] is True
+    assert "Record it as a memory." in declined["judge"]["instructions"]
+    metrics = engine.execution_snapshot()["metrics"]
+    assert metrics["num_refinements_declined_no_edits"] == 1
+    assert metrics["num_judge_would_refine_declined"] == 1
+
+
+async def test_host_review_and_focus_by_the_judge(session):
+    """A host review by the judge can decline with no model call; host focus always
+    plans, with the judge's instructions ahead of the host's, or the host's alone
+    when nothing fired."""
+    proposal = DummyMessage(content=_proposal([]))
+    client = DummyClient([DummyMessage(content="hi"), proposal, proposal])
+    engine, fake = _judged_engine(
+        client,
+        session,
+        [
+            {"durable_fact": 0.2},
+            {"user_correction": 0.9},
+            {"home_user_correction": HOME_MEMORY},
+            {},
+        ],
+        auto_refine=False,
+    )
+    host = {"instructions": "keep", "global_": False, "rollback_id": None}
+    await engine.prompt("hello")
+
+    declined = await engine.prompt("", refine={**host, "review": True})
+    assert declined.answer.startswith("[refinement declined: no signal reached")
+    assert len(client.calls) == 1
+
+    focused = await engine.prompt("", refine={**host, "focus": True})
+    assert focused.answer == "[refinement declined: seen twice]"
+    plan = client.calls[1]["messages"][-1]["content"]
+    assert "Record it as a memory." in plan
+    assert plan.endswith("Host instructions: keep\n</refine_instructions>")
+
+    await engine.prompt("", refine={**host, "focus": True})
+    assert client.calls[2]["messages"][-1]["content"].endswith(
+        "<refine_instructions>\nkeep\n</refine_instructions>"
+    )
+    assert len(fake.calls) == 4
+    passes = _records(session, "refinement_declined")
+    assert [(r["trigger"], r["reason"], r["judge"]["mode"]) for r in passes] == [
+        ("host", "gate", "gate"),
+        ("host", "no_edits", "focus"),
+        ("host", "no_edits", "focus"),
+    ]
+    assert not any("message" in r for r in passes)
+
+
+async def test_host_global_pass_is_judged_against_the_global_store(session, tmp_path):
+    """A global pass shows the judge the global store first, with its refinement
+    history, and points the planner at the global entry the conversation contradicts."""
+    global_dir = tmp_path / "global"
+    HarnessStore(global_dir, scope="global").create(
+        "memory", "Style", "answers are short"
+    )
+    client = DummyClient(
+        [DummyMessage(content="hi"), DummyMessage(content=_proposal([]))]
+    )
+    engine, fake = _judged_engine(
+        client,
+        session,
+        [{"wrong_0": 0.9}],
+        auto_refine=False,
+        global_dir=str(global_dir),
+    )
+    await engine.prompt("we want long answers now")
+
+    await engine.prompt(
+        "",
+        refine={
+            "instructions": None,
+            "global_": True,
+            "rollback_id": None,
+            "focus": True,
+        },
+    )
+
+    state = fake.calls[0][0]
+    assert state["scope"] == "global"
+    assert state["harness_entries"][0]["ref"] == "global:style"
+    assert state["recent_refinements"] == ["No prior refinements."]
+    plan = client.calls[1]["messages"][-1]["content"]
+    assert "Requested scope: global" in plan
+    assert (
+        "Entry global:style is contradicted by the conversation: update or delete"
+        in (plan)
+    )
+
+
+async def test_auto_refine_after_compaction_plans_on_the_new_blocks(session):
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
             # Every tool result crosses the 1-token threshold: branch summary.
             DummyMessage(content="branch one: the parser fix needed two retries"),
-            # Review on the compact trigger, approved, then the plan.
-            DummyMessage(
-                content='{"should_refine": true, "rationale": "recurring", "instructions": "keep it"}'
-            ),
             DummyMessage(
                 content=_proposal(
                     [
@@ -495,7 +696,9 @@ async def test_auto_refine_after_compaction_reviews_the_new_blocks(session):
     )
     config = make_runtime_config(
         policy=ExecutionPolicy(summarize_at_tokens=1),
-        harness=HarnessConfig(auto_refine=True, refine_cooldown_seconds=0),
+        harness=HarnessConfig(
+            auto_refine=True, auto_refine_review="planner", refine_cooldown_seconds=0
+        ),
     )
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
@@ -503,35 +706,32 @@ async def test_auto_refine_after_compaction_reviews_the_new_blocks(session):
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
-    review = client.calls[2]["messages"][-1]["content"]
-    assert "trigger:\ncompact" in review
-    assert "<compaction_blocks>\n" + BLOCKS_NOTE in review
-    assert "[tier 1 | branch 0 |" in review
-    assert "the parser fix needed two retries" in review
-    plan = client.calls[3]["messages"][-1]["content"]
+    plan = client.calls[2]["messages"][-1]["content"]
     assert "<evidence>\n" + BLOCKS_NOTE in plan
-    assert plan.index("</evidence>") < plan.index("<refine_instructions>")
-    reviews = _records(session, "refinement_review")
-    assert [(r["reason"], r["blocks"]) for r in reviews] == [("compact", [[1, 0, 1]])]
-    assert _records(session, "refinement")[0]["trigger"] == "auto:compact"
+    assert "[tier 1 | branch 0 |" in plan
+    assert "the parser fix needed two retries" in plan
+    assert "auto:compact" in plan
+    assert plan.index("</evidence>") < plan.index("<automatic_refinement>")
+    [applied] = _records(session, "refinement")
+    assert (applied["trigger"], applied["blocks"]) == ("auto:compact", [[1, 0, 1]])
     assert engine._compact_refine_blocks is None
 
 
-def test_review_prompt_lists_new_blocks_coarse_first(tmp_path):
+def test_refine_prompt_lists_blocks_coarse_first_and_notes_automatic_passes(tmp_path):
     view = build_view(local_dir(tmp_path))
     fine = Block(1, (4, 5), (400, 499), (4, 4), (40, 49), "fifth branch", "r5")
     coarse = Block(2, (0, 5), (0, 499), (0, 4), (0, 49), "x" * 700, "r-rollup")
-    prompt = review_prompt(
-        view, [], trigger="compact", turns_since_review=3, blocks=[fine, coarse]
+    args = dict(scope="local", instructions=None, importable_names=["rlm"])
+    prompt = refine_prompt(
+        view, [], evidence=[fine, coarse], auto_note="automatic", **args
     )
 
     assert prompt.index(fine.header()) < prompt.index(coarse.header())
     assert "x" * 600 not in prompt
     assert BLOCKS_NOTE in prompt
-    assert "compaction blocks since" in prompt
-    assert "<compaction_blocks>" not in review_prompt(
-        view, [], trigger="turn_interval", turns_since_review=3
-    )
+    assert "<automatic_refinement>\nautomatic\n" in prompt
+    plain = refine_prompt(view, [], **args)
+    assert "<evidence>" not in plain and "<automatic_refinement>" not in plain
 
 
 async def test_auto_refine_is_root_only_and_off_by_default(session):
@@ -542,26 +742,24 @@ async def test_auto_refine_is_root_only_and_off_by_default(session):
     config = make_runtime_config(harness=HarnessConfig(refine_turn_interval=1))
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
     await engine.run("go")
-    assert len(client.calls) == 4 and _records(session, "refinement_review") == []
+    assert len(client.calls) == 4
+    assert _records(session, "refinement") == []
+    assert _records(session, "refinement_declined") == []
+    with pytest.raises(ValidationError, match="auto_refine needs refine_judge"):
+        HarnessConfig(auto_refine=True)
 
 
 async def test_max_refinements_declines_further_passes(session):
-    client = DummyClient(
-        [
-            DummyMessage(content=_proposal([])),
-            DummyMessage(content="done"),
-        ]
-    )
+    client = DummyClient([DummyMessage(content=_proposal([LESSON]))])
     config = make_runtime_config(harness=HarnessConfig(max_refinements=1))
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
-    first = await engine.prompt(
-        "", refine={"instructions": None, "global_": False, "rollback_id": None}
+    host = {"instructions": None, "global_": False, "rollback_id": None}
+    first = await engine.prompt("", refine=host)
+    assert "create memory:lesson" in first.answer
+    second = await engine.prompt("", refine=host)
+    assert second.answer == (
+        "[refinement declined: this agent reached max_refinements=1]"
     )
-    assert "No edits applied." in first.answer
-    second = await engine.prompt(
-        "", refine={"instructions": None, "global_": False, "rollback_id": None}
-    )
-    assert second.answer == "[refinement declined]"
     assert _records(session, "refinement_declined")[0]["reason"] == "limit"
     assert len(client.calls) == 1
 

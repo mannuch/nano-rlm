@@ -14,10 +14,12 @@ import time
 import uuid
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
+from typesafe_sdk import TypeSafeError
 
 from rlm.client import (
     call_with_retries,
@@ -55,7 +57,9 @@ from rlm.harness import (
 from rlm.semantic import Compaction, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt, render_harness, resolve_prompts
+from rlm.refine_judge import RefineJudge, build_evidence
 from rlm.refinement import (
+    AUTO_REFINE_NOTE,
     RefinementFailed,
     RefinementRejected,
     RefinementResult,
@@ -65,9 +69,7 @@ from rlm.refinement import (
     load_history,
     notice_text,
     parse_proposal,
-    parse_review,
     refine_prompt,
-    review_prompt,
     rollback_proposal,
 )
 from rlm.session import Session
@@ -89,6 +91,8 @@ from rlm.types import (
     CompactionApplied,
     ProgrammaticToolCallStats,
     RefinementApplied,
+    RefinementDeclined,
+    RefinementJudged,
     RLMMetrics,
     RLMResult,
     TokenUsage,
@@ -217,6 +221,37 @@ def _looks_like_plan(text: str) -> bool:
     )
 
 
+@dataclass
+class _Pass:
+    """A refinement pass's outcome: the applied result, why it declined, or why it
+    failed."""
+
+    result: RefinementResult | None = None
+    declined: str | None = None
+    failed: str | None = None
+
+
+def _judge_summary(record: dict[str, Any]) -> RefinementJudged | None:
+    judge = record.get("judge")
+    if judge is None:
+        return None
+    return RefinementJudged(
+        would_refine=None if "error" in judge else judge["gate_decision"],
+        input_tokens=sum(
+            call.get("input_tokens") or 0 for call in judge.get("usage", {}).values()
+        ),
+    )
+
+
+def _pass_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    """A pass's ledger record without what it put in the conversation."""
+    return {
+        key: value
+        for key, value in entry.items()
+        if key not in ("message", "provenance", "rebuilt_window")
+    }
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -241,7 +276,9 @@ class RLMEngine:
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
-        self.cwd = cwd or os.getcwd()
+        # The kernel starts in cwd and then chdirs to it, so a relative path would
+        # resolve twice.
+        self.cwd = str(Path(cwd).resolve()) if cwd else os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
         self.max_total_turns = config.policy.max_total_turns
         self.max_tool_output_bytes = config.policy.max_tool_output_bytes
@@ -307,10 +344,19 @@ class RLMEngine:
 
         # Continual harness refinement bookkeeping.
         self._refinement_count = 0
+        self._refinement_records: list[dict[str, Any]] = []
         self._turns_since_refine_review = 0
         self._last_refine_review_at: float | None = None
         # Blocks the latest compaction produced, pending an auto-refine review.
         self._compact_refine_blocks: list[Block] | None = None
+        # Stable message index where the next review's evidence starts.
+        self._review_mark = 0
+        judge = config.harness.refine_judge
+        self._refine_judge = (
+            RefineJudge(judge)
+            if judge is not None and config.harness.enabled and self.depth == 0
+            else None
+        )
 
         # Metrics
         self._metrics = RLMMetrics()
@@ -377,9 +423,10 @@ class RLMEngine:
     ) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state.
 
-        ``refine`` (``instructions``, ``global_``, ``rollback_id``) runs a host-requested
-        harness refinement before the turn; with an empty prompt the refinement is the
-        whole turn and its notice is the answer.
+        ``refine`` (``instructions``, ``global_``, ``rollback_id``, ``review``,
+        ``focus``) runs a host-requested harness refinement before the turn; with an
+        empty prompt the refinement is the whole turn and its notice (or the review's
+        decline) is the answer.
         """
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
@@ -447,15 +494,23 @@ class RLMEngine:
                     raise ValueError(
                         "the continual harness is disabled for this session"
                     )
-                refined = await self._refine(trigger="host", **refine)
+                refined = await self._refine(
+                    trigger="host",
+                    instructions=refine.get("instructions"),
+                    global_=refine.get("global_", False),
+                    rollback_id=refine.get("rollback_id"),
+                    gate=refine.get("review", False),
+                    focus=refine.get("focus", False),
+                )
             if refine is not None and not prompt.strip():
                 self._metrics.stop_reason = "refined"
-                result = RLMResult(
-                    answer=notice_text(refined)
-                    if refined is not None
-                    else "[refinement declined]",
-                    session_dir=self.session.dir,
-                )
+                if refined.result is not None:
+                    answer = notice_text(refined.result)
+                elif refined.declined is not None:
+                    answer = f"[refinement declined: {refined.declined}]"
+                else:
+                    answer = f"[refinement failed: {refined.failed}]"
+                result = RLMResult(answer=answer, session_dir=self.session.dir)
             else:
                 self.session.log(
                     {
@@ -1062,6 +1117,8 @@ class RLMEngine:
             try:
                 if self._owns_client:
                     await self.client.close()
+                if self._refine_judge is not None:
+                    await self._refine_judge.aclose()
             finally:
                 self._close_local()
 
@@ -1628,6 +1685,12 @@ class RLMEngine:
                 sealed.append(block)
         return sealed
 
+    @property
+    def refinement_records(self) -> list[dict[str, Any]]:
+        """This engine's refinement passes, applied or not, as in the ledger but
+        without what they put in the conversation."""
+        return list(self._refinement_records)
+
     def execution_snapshot(self) -> dict:
         """Return a credential-free snapshot of cumulative execution state."""
         if self.session is None:
@@ -1734,58 +1797,45 @@ class RLMEngine:
         self._turns_since_refine_review = 0
         self._last_refine_review_at = now
 
-        refinement = self._semantic_edges.begin_refinement(self._invocation_id)
-        prompt = review_prompt(
-            self._harness,
-            load_history(self._harness.local),
-            trigger=reason,
-            turns_since_review=turns,
-            blocks=blocks,
-            template=self.prompts["review"],
-        )
-        try:
-            response, _ = await self._call_model(
-                [*self.session.messages, {"role": "user", "content": prompt}],
-                refinement_id=refinement.refinement_id,
-            )
-            text = (response.choices[0].message.content or "").strip()
-            should_refine, rationale, instructions = parse_review(text)
-        except (APIStatusError, RefinementRejected) as error:
-            self._semantic_edges.finish_refinement(refinement.refinement_id, "failed")
-            logger.warning("rlm: auto-refine review failed: %s", error)
-            return
-        except BaseException:
-            self._semantic_edges.finish_refinement(
-                refinement.refinement_id, "cancelled"
-            )
-            raise
-        self._metrics.record(
-            RefinementApplied(
-                trigger=f"auto:{reason}",
-                edits_applied=0,
-                edits_rejected=0,
-                review_only=True,
-            )
-        )
-        self.session.log(
-            {
-                "type": "refinement_review",
-                "reason": reason,
-                "should_refine": should_refine,
-                "rationale": rationale,
-                "request_id": self._last_request_id,
-                "blocks": [list(block.key) for block in blocks or []],
-            }
-        )
-        if not should_refine:
-            self._semantic_edges.finish_refinement(refinement.refinement_id, "declined")
-            return
-        self._semantic_edges.release_refinement_request(refinement.refinement_id)
-        await self._refine(
+        judge = config.refine_judge if config.auto_refine_review == "judge" else None
+        outcome = await self._refine(
             trigger=f"auto:{reason}",
-            instructions=instructions,
-            refinement=refinement,
+            gate=judge is not None and judge.mode == "gate",
+            shadow=judge is not None and judge.mode == "shadow",
             evidence=blocks,
+            turns_since_review=turns,
+        )
+        if outcome.failed is None:
+            self._metrics.record(
+                RefinementApplied(
+                    trigger=f"auto:{reason}",
+                    edits_applied=0,
+                    edits_rejected=0,
+                    review_only=True,
+                )
+            )
+
+    def _judge_evidence(
+        self, trigger: str, blocks: list[Block] | None, start: int, store
+    ) -> dict[str, Any]:
+        """The judge's state: context messages logged since ``start``, a stable
+        message index that survives window rebuilds, seen from ``store``, the store
+        the pass writes."""
+        messages = [
+            (index, message)
+            for index, message in zip(
+                self.session.context_indices, self.session.messages, strict=True
+            )
+            if index >= start
+        ]
+        return build_evidence(
+            task=self._task_text,
+            trigger=trigger,
+            messages=messages,
+            view=self._harness,
+            history=load_history(store),
+            scope=store.scope,
+            blocks=blocks,
         )
 
     async def _refine(
@@ -1795,14 +1845,25 @@ class RLMEngine:
         instructions: str | None = None,
         global_: bool = False,
         rollback_id: str | None = None,
-        refinement=None,
+        gate: bool = False,
+        focus: bool = False,
+        shadow: bool = False,
         evidence: list[Block] | None = None,
-    ) -> RefinementResult | None:
-        """One refinement pass: plan (or build a rollback), apply, rebuild the system
-        prompt, and tell the model what changed. A pass that produces no usable
-        proposal is reported in the conversation and never ends the run. ``evidence``
-        is the compaction blocks an automatic review approved on, shown to the planner.
+        turns_since_review: int | None = None,
+    ) -> _Pass:
+        """One refinement pass: a single planning call (or a rollback), then apply,
+        rebuild the system prompt, and tell the model what changed.
+
+        The planner declines by proposing no edits, which changes nothing. With
+        ``gate`` the TypeSafe judge decides first and a decline makes no model call;
+        ``focus`` has the judge write the plan's instructions without gating; ``shadow``
+        only records its verdict. An automatic pass (``turns_since_review`` set) also
+        tells the planner when not to edit, and ``evidence`` is the compaction blocks
+        behind it. A pass that produces no usable proposal is reported in the
+        conversation and never ends the run.
         """
+        if rollback_id is not None and (gate or focus or shadow):
+            raise ValueError("a rollback takes no review or focus")
         view = self._harness
         if view is None:
             raise RuntimeError("the continual harness is disabled for this session")
@@ -1810,30 +1871,99 @@ class RLMEngine:
         if store is None:
             raise RefinementFailed("no global harness store is configured")
         config = self.harness_config
+        record: dict[str, Any] = {"trigger": trigger}
+        if evidence:
+            record["blocks"] = [list(block.key) for block in evidence]
         if (
             config.max_refinements is not None
             and self._refinement_count >= config.max_refinements
         ):
-            self._log_refinement_notice(
-                f"Refinement declined: this agent reached max_refinements="
-                f"{config.max_refinements}.",
+            rationale = f"this agent reached max_refinements={config.max_refinements}"
+            self._log_refinement_declined(
+                record,
                 reason="limit",
+                rationale=rationale,
+                notice=f"Refinement declined: {rationale}.",
             )
-            return None
+            return _Pass(declined=rationale)
+
+        if rollback_id is None:
+            judge_runs = gate or focus or shadow
+            if judge_runs and self._refine_judge is None:
+                raise ValueError("a TypeSafe review requires harness.refine_judge")
+            state = (
+                self._judge_evidence(trigger, evidence, self._review_mark, store)
+                if judge_runs
+                else None
+            )
+            self._review_mark = self.session.message_count
+            if judge_runs:
+                mode = "gate" if gate else "focus" if focus else "shadow"
+                try:
+                    verdict = await self._refine_judge.review(state, force=not gate)
+                except TypeSafeError as error:
+                    logger.warning("rlm: refinement judge failed: %s", error)
+                    record["judge"] = {"mode": mode, "error": str(error)}
+                    if gate:
+                        self._log_refinement_declined(
+                            record,
+                            reason="failed",
+                            rationale=f"review failed: {error}",
+                        )
+                        return _Pass(failed=f"review failed: {error}")
+                else:
+                    record["judge"] = {"mode": mode, **verdict.record()}
+                    if not verdict.should_refine:
+                        self._log_refinement_declined(
+                            record, reason="gate", rationale=verdict.rationale
+                        )
+                        return _Pass(declined=verdict.rationale)
+                    if mode != "shadow" and verdict.instructions:
+                        instructions = (
+                            f"{verdict.instructions}\n\nHost instructions: {instructions}"
+                            if instructions
+                            else verdict.instructions
+                        )
+
         if self._supervisor is not None:
             self._supervisor.set_refine_in_flight(self._invocation_id, True)
+        try:
+            return await self._plan_and_apply(
+                store,
+                record,
+                trigger=trigger,
+                instructions=instructions,
+                rollback_id=rollback_id,
+                evidence=evidence,
+                turns_since_review=turns_since_review,
+            )
+        finally:
+            if self._supervisor is not None:
+                self._supervisor.set_refine_in_flight(self._invocation_id, False)
+
+    async def _plan_and_apply(
+        self,
+        store,
+        record: dict[str, Any],
+        *,
+        trigger: str,
+        instructions: str | None,
+        rollback_id: str | None,
+        evidence: list[Block] | None,
+        turns_since_review: int | None,
+    ) -> _Pass:
+        view = self._harness
+        config = self.harness_config
         importable = {*discover_skills(self.session.dir, self._skills_dir), "rlm"}
         usage_total = TokenUsage()
         request_ids: list[str] = []
         baseline = None
+        refinement = None
         try:
             if rollback_id is not None:
                 proposal = rollback_proposal(find_result(store, rollback_id))
             else:
-                if refinement is None:
-                    refinement = self._semantic_edges.begin_refinement(
-                        self._invocation_id
-                    )
+                refinement = self._semantic_edges.begin_refinement(self._invocation_id)
                 baseline = baseline_of(store)
                 prompt = refine_prompt(
                     view,
@@ -1842,6 +1972,10 @@ class RLMEngine:
                     instructions=instructions,
                     importable_names=sorted(importable),
                     evidence=evidence,
+                    auto_note=AUTO_REFINE_NOTE
+                    % {"trigger": trigger, "turns": turns_since_review}
+                    if turns_since_review is not None
+                    else None,
                     template=self.prompts["refine"],
                 )
                 proposal = None
@@ -1875,6 +2009,25 @@ class RLMEngine:
                     raise RefinementFailed(
                         f"no usable proposal after {config.max_refinement_attempts} attempts"
                     )
+                if not proposal.edits:
+                    self._semantic_edges.finish_refinement(
+                        refinement.refinement_id, "declined"
+                    )
+                    rationale = proposal.rationale or proposal.summary
+                    self._log_refinement_declined(
+                        record,
+                        reason="no_edits",
+                        rationale=rationale,
+                        notice=f"Refinement declined: {rationale}"
+                        if trigger == "kernel"
+                        else None,
+                        request_ids=request_ids,
+                        usage={
+                            "prompt_tokens": usage_total.prompt_tokens,
+                            "completion_tokens": usage_total.completion_tokens,
+                        },
+                    )
+                    return _Pass(declined=rationale)
             result = apply_proposal(
                 store,
                 proposal,
@@ -1896,13 +2049,15 @@ class RLMEngine:
                     if isinstance(exc, asyncio.CancelledError)
                     else "failed",
                 )
-            if self._supervisor is not None:
-                self._supervisor.set_refine_in_flight(self._invocation_id, False)
             if isinstance(exc, RefinementFailed):
-                self._log_refinement_notice(
-                    f"Refinement failed: {exc}", reason="failed"
+                self._log_refinement_declined(
+                    record,
+                    reason="failed",
+                    rationale=str(exc),
+                    notice=f"Refinement failed: {exc}",
+                    request_ids=request_ids,
                 )
-                return None
+                return _Pass(failed=str(exc))
             raise
 
         self._refinement_count += 1
@@ -1910,43 +2065,57 @@ class RLMEngine:
         message, provenance = runtime_event(
             "refinement", notice_text(result), trigger=trigger, scope=result.scope
         )
-        self.session.log(
-            {
-                "type": "refinement",
-                "trigger": trigger,
-                "result": result.to_dict(),
-                "rebuilt_window": window,
-                "message": message,
-                "provenance": provenance,
-            },
-            in_context=True,
-        )
+        entry = {
+            "type": "refinement",
+            **record,
+            "result": result.to_dict(),
+            "rebuilt_window": window,
+            "message": message,
+            "provenance": provenance,
+        }
+        self.session.log(entry, in_context=True)
+        self._refinement_records.append(_pass_summary(entry))
         applied = sum(1 for e in result.applied_edits if e.applied)
         self._metrics.record(
             RefinementApplied(
                 trigger=trigger,
                 edits_applied=applied,
                 edits_rejected=len(result.applied_edits) - applied,
+                judge=_judge_summary(record),
             )
         )
         if refinement is not None:
             self._semantic_edges.finish_refinement(
                 refinement.refinement_id, "completed"
             )
-        if self._supervisor is not None:
-            self._supervisor.set_refine_in_flight(self._invocation_id, False)
-        return result
+        return _Pass(result=result)
 
-    def _log_refinement_notice(self, text: str, *, reason: str) -> None:
-        message, provenance = runtime_event("refinement", text, reason=reason)
-        self.session.log(
-            {
-                "type": "refinement_declined",
-                "reason": reason,
-                "message": message,
-                "provenance": provenance,
-            },
-            in_context=True,
+    def _log_refinement_declined(
+        self,
+        record: dict[str, Any],
+        *,
+        reason: str,
+        rationale: str,
+        notice: str | None = None,
+        **extra: Any,
+    ) -> None:
+        """A pass that changed nothing. ``notice`` also tells the model, in context."""
+        entry = {
+            "type": "refinement_declined",
+            **record,
+            "reason": reason,
+            "rationale": rationale,
+            **extra,
+        }
+        if notice is not None:
+            message, provenance = runtime_event("refinement", notice, reason=reason)
+            entry.update(message=message, provenance=provenance)
+        self.session.log(entry, in_context=notice is not None)
+        self._refinement_records.append(_pass_summary(entry))
+        self._metrics.record(
+            RefinementDeclined(
+                trigger=record["trigger"], reason=reason, judge=_judge_summary(record)
+            )
         )
 
     def _install_system_prompt(self, task_text: str) -> int | None:
