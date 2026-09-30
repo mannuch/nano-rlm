@@ -8,6 +8,7 @@ import pytest
 
 from rlm.prompt import (
     DEFAULT_PROMPTS,
+    DELEGATION_PROMPT,
     EDIT_SKILL_PROMPT,
     GIT_HISTORY_GUARD_PROMPT,
     IPYTHON_CONTROL_PROMPT,
@@ -167,8 +168,10 @@ def test_runtime_guidance_matches_agent_capabilities():
         allow_recursion=True,
         allow_git=False,
         active_tools=[_Tool("bash")],
+        delegation_prompt=True,
     )
     assert "rlm.agent.spawn(" not in native
+    assert DELEGATION_PROMPT not in native
     assert "rlm.shell.run(" not in native
     assert "await search" not in native
     assert "native bash tool" in native
@@ -196,7 +199,18 @@ def test_runtime_guidance_matches_agent_capabilities():
         allow_git=False,
         active_tools=[_Tool("ipython")],
     )
-    assert "## Delegating work" in guided
+    appended = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=True,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+        extra_instructions=DELEGATION_PROMPT,
+    )
+    assert guided == appended
+    assert guided.count(DELEGATION_PROMPT) == 1
+    assert guided.index(DELEGATION_PROMPT) < guided.index("## Agent context")
     guided_leaf = build_system_prompt(
         "/repo",
         None,

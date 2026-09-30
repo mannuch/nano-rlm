@@ -533,6 +533,8 @@ def build_system_prompt(
     parts = [task_instructions if task_instructions is not None else texts["task"]]
     if extra_instructions:
         parts.append(extra_instructions)
+    if can_delegate and delegation_prompt:
+        parts.append(DELEGATION_PROMPT)
     parts.append("## Agent context")
     if agent_info:
         parts.append(
@@ -592,8 +594,6 @@ def build_system_prompt(
                     DELEGATION_DOCTRINE_SLOT, texts["delegation_doctrine"]
                 )
             )
-            if delegation_prompt:
-                parts.append(DELEGATION_PROMPT)
         else:
             parts.append(
                 "Delegation is disabled at this depth. Work directly with your available tools."
