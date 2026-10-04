@@ -368,6 +368,11 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
+        self._steering_active = False
+        self._steering_pending: list[tuple[str, str | None, asyncio.Future]] = []
+        self._steering_ids: dict[str, tuple[str, asyncio.Future]] = {}
+        self._steering_applied: list[tuple[int, dict]] = []
+        self._steering_ready = asyncio.Event()
         self._pending_kernel_notices: list[str] = []
         self._prompt_kernel_notices: list[str] = []
 
@@ -415,7 +420,90 @@ class RLMEngine:
         finally:
             await self.aclose()
 
+    async def steer(self, text: str, message_id: str | None = None) -> dict:
+        """Insert a user message at the next model boundary without cancelling tools."""
+        if message_id is not None and message_id in self._steering_ids:
+            previous, receipt = self._steering_ids[message_id]
+            if previous != text:
+                raise ValueError("steering message ID reused with different content")
+            return await asyncio.shield(receipt)
+        if not self._steering_active:
+            return {"outcome": "promptRequired", "reason": "noRunningTurn"}
+        receipt = asyncio.get_running_loop().create_future()
+        if message_id is not None:
+            self._steering_ids[message_id] = (text, receipt)
+        self._steering_pending.append((text, message_id, receipt))
+        self._steering_ready.set()
+        return await asyncio.shield(receipt)
+
+    def _apply_steering(self) -> None:
+        while self._steering_pending:
+            text, message_id, receipt = self._steering_pending[0]
+            message = {"role": "user", "content": text}
+            index = self.session.log(
+                {
+                    "type": "user",
+                    "turn": self._turn,
+                    "content": text,
+                    "message": message,
+                    "steering_id": message_id,
+                },
+                in_context=True,
+            )
+            self._steering_applied.append((index, message))
+            self._last_good = len(self.session.messages)
+            self._steering_pending.pop(0)
+            receipt.set_result({"outcome": "injected"})
+        self._steering_ready.clear()
+
+    async def _wait_for_events(self, timeout: float) -> str:
+        events = asyncio.create_task(
+            self._supervisor.wait_for_events(self._invocation_id, timeout)
+        )
+        steering = asyncio.create_task(self._steering_ready.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (events, steering), return_when=asyncio.FIRST_COMPLETED
+            )
+            return (
+                events.result()
+                if events in done
+                else "A new user message is available."
+            )
+        finally:
+            events.cancel()
+            steering.cancel()
+            await asyncio.gather(events, steering, return_exceptions=True)
+
     async def prompt(
+        self,
+        prompt: str,
+        *,
+        message_type: str = "user",
+        event_ids: list[str] | None = None,
+        refine: dict | None = None,
+    ) -> RLMResult:
+        """Run one user turn while accepting steering at model boundaries."""
+        if self._steering_active:
+            raise RuntimeError("a prompt is already running")
+        self._steering_active = True
+        self._steering_applied = []
+        try:
+            return await self._prompt(
+                prompt, message_type=message_type, event_ids=event_ids, refine=refine
+            )
+        finally:
+            self._steering_active = False
+            for _, message_id, receipt in self._steering_pending:
+                if message_id is not None:
+                    self._steering_ids.pop(message_id, None)
+                receipt.set_result(
+                    {"outcome": "promptRequired", "reason": "noRunningTurn"}
+                )
+            self._steering_pending.clear()
+            self._steering_ready.clear()
+
+    async def _prompt(
         self,
         prompt: str,
         *,
@@ -548,10 +636,18 @@ class RLMEngine:
                     )
                 finally:
                     self.session.replace_context(
-                        messages_before, reason="rollback", indices=context_before
+                        messages_before
+                        + [message for _, message in self._steering_applied],
+                        reason="rollback",
+                        indices=context_before
+                        + [index for index, _ in self._steering_applied],
                     )
             finally:
-                self._last_good = last_good_before
+                self._last_good = (
+                    len(self.session.messages)
+                    if self._steering_applied
+                    else last_good_before
+                )
                 self._compacted = compacted_before
                 self._branch_start_turn = branch_start_before
                 self._branch_first_index, self._branch_first_window = (
@@ -673,7 +769,7 @@ class RLMEngine:
             skills_dir=self._skills_dir,
         )
         try:
-            startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
+            startup = asyncio.create_task(self._repl.run_in_thread(self._repl.start))
             cancelled = False
             while True:
                 try:
@@ -831,6 +927,7 @@ class RLMEngine:
                     )
                 )
                 break
+            self._apply_steering()
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
             await self._refine_at_boundary()
@@ -909,6 +1006,8 @@ class RLMEngine:
 
             # No tool calls → done
             if not msg.tool_calls:
+                if self._steering_pending:
+                    continue
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
                 # Give empty replies a bounded opportunity to continue.
@@ -979,10 +1078,7 @@ class RLMEngine:
                         note = f"Note: wait timeout clamped from {timeout:g} to 300 seconds.\n"
                         timeout = 300
                     tool_result = ToolOutcome(
-                        content=note
-                        + await self._supervisor.wait_for_events(
-                            self._invocation_id, timeout
-                        )
+                        content=note + await self._wait_for_events(timeout)
                     )
             elif tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
@@ -1001,10 +1097,9 @@ class RLMEngine:
                 try:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
+                    run = repl.run_in_thread if repl is not None else asyncio.to_thread
                     tool_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            tool.execute, tool_args, self._tool_context(messages)
-                        )
+                        run(tool.execute, tool_args, self._tool_context(messages))
                     )
                     try:
                         tool_result = await asyncio.shield(tool_task)
