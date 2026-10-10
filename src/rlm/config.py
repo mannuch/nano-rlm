@@ -178,16 +178,13 @@ class ExecutionPolicy(_ConfigModel):
     window, ahead of the staircase. A larger prompt is referenced by ledger index in
     the staircase message instead; 0 never keeps it."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
+    """Concurrent inference calls across the tree, including root and compaction calls.
+    Queued calls prioritize shallower agents, FIFO within each depth. Tools run freely.
+    """
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
-
-    @model_validator(mode="after")
-    def _validate_concurrency(self) -> Self:
-        if self.max_concurrent_subagents < self.max_depth:
-            raise ValueError("max_concurrent_subagents must be at least max_depth")
-        return self
 
 
 def validate_prompt_overrides(overrides: dict[str, str]) -> dict[str, str]:
