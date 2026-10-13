@@ -1,6 +1,7 @@
 """Builtin tools, uploaded-skill discovery, and REPL helpers."""
 
 from rlm.tools.base import BuiltinTool, ToolContext, ToolOutcome
+from rlm.tools.discovery import get, search, servers
 from rlm.tools.ipython import IPythonREPL
 from rlm.tools.registry import (
     get_active_builtin_tools,
@@ -28,6 +29,9 @@ __all__ = [
     "get_active_builtin_tools",
     "get_active_tools",
     "get_builtin_tool",
+    "get",
+    "search",
+    "servers",
     "get_installed_skills",
     "list_authored_skills",
 ]

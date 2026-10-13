@@ -12,6 +12,7 @@ from rlm.prompt import (
     EDIT_SKILL_PROMPT,
     GIT_HISTORY_GUARD_PROMPT,
     IPYTHON_CONTROL_PROMPT,
+    MCP_DISCOVERY_PROMPT,
     SEARCH_SKILL_PROMPT,
     build_system_prompt,
     resolve_prompts,
@@ -28,6 +29,7 @@ def _prompt(
     *,
     installed_skills: list[str] | None = None,
     allow_git: bool = False,
+    mcp_servers: list[dict] | None = None,
 ) -> str:
     return build_system_prompt(
         "/repo",
@@ -36,6 +38,7 @@ def _prompt(
         allow_recursion=False,
         allow_git=allow_git,
         active_tools=active_tools,
+        mcp_servers=mcp_servers,
     )
 
 
@@ -96,10 +99,20 @@ def test_ipython_control_prompt_included_for_ipython_tool():
     assert "res = await job.result()" in prompt
     assert "rlm.shell.start" not in prompt
     assert "project's interpreter" in prompt
+    assert MCP_DISCOVERY_PROMPT not in prompt
+    assert MCP_DISCOVERY_PROMPT not in _prompt(
+        [_Tool("ipython")], mcp_servers=[{"name": "empty", "tool_count": 0}]
+    )
+    assert MCP_DISCOVERY_PROMPT in _prompt(
+        [_Tool("ipython")], mcp_servers=[{"name": "tools", "tool_count": 1}]
+    )
 
 
 def test_ipython_control_prompt_omitted_without_ipython_tool():
     assert IPYTHON_CONTROL_PROMPT not in _prompt([])
+    assert MCP_DISCOVERY_PROMPT not in _prompt(
+        [_Tool("bash")], mcp_servers=[{"name": "tools", "tool_count": 1}]
+    )
 
 
 def test_edit_skill_prompt_included_only_when_edit_is_installed():
