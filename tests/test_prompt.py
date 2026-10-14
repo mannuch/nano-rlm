@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from rlm.tools.skills import discover_skill_docs
 from rlm.prompt import (
     DEFAULT_PROMPTS,
     DELEGATION_PROMPT,
@@ -33,7 +34,6 @@ def _prompt(
 ) -> str:
     return build_system_prompt(
         "/repo",
-        None,
         installed_skills or [],
         allow_recursion=False,
         allow_git=allow_git,
@@ -45,7 +45,6 @@ def _prompt(
 def test_prompt_overrides_replace_registry_texts():
     prompt = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         allow_git=True,
@@ -119,6 +118,7 @@ def test_edit_skill_prompt_included_only_when_edit_is_installed():
     prompt = _prompt([_Tool("ipython")], installed_skills=["edit"])
 
     assert EDIT_SKILL_PROMPT in prompt
+    assert "pre-imported async `edit` tool" in prompt
     assert 'await edit(path="pkg/file.py", old_str=..., new_str=...)' in prompt
     assert EDIT_SKILL_PROMPT not in _prompt(
         [_Tool("ipython")], installed_skills=["search_docs"]
@@ -129,6 +129,7 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     prompt = _prompt([_Tool("ipython")], installed_skills=["search"])
 
     assert SEARCH_SKILL_PROMPT in prompt
+    assert "pre-imported async `search` tool" in prompt
     assert "await search(query=" in prompt
     assert "one formatted text string" in prompt
     assert SEARCH_SKILL_PROMPT not in _prompt(
@@ -136,10 +137,9 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     )
 
 
-def test_prompt_only_advertises_actual_shell_skills():
+def test_prompt_only_advertises_actual_shell_tools():
     prompt = build_system_prompt(
         "/repo",
-        None,
         ["edit", "uploaded"],
         allow_recursion=False,
         allow_git=False,
@@ -147,14 +147,16 @@ def test_prompt_only_advertises_actual_shell_skills():
         shell_skills=["uploaded"],
     )
 
-    assert "Shell-enabled installed skills: `uploaded`" in prompt
-    assert "Other listed skills are IPython-only" in prompt
+    assert "Python tools (pre-imported): `edit`, `uploaded`" in prompt
+    assert "help(tool)" in prompt
+    assert "Shell-enabled Python tools: `uploaded`" in prompt
+    assert "Other listed Python tools are IPython-only" in prompt
+    assert "## Skills" not in prompt
 
 
 def test_runtime_guidance_matches_agent_capabilities():
     leaf = build_system_prompt(
         "/repo",
-        None,
         [],
         depth=1,
         allow_recursion=False,
@@ -176,7 +178,6 @@ def test_runtime_guidance_matches_agent_capabilities():
 
     native = build_system_prompt(
         "/repo",
-        None,
         ["search"],
         allow_recursion=True,
         allow_git=False,
@@ -192,7 +193,6 @@ def test_runtime_guidance_matches_agent_capabilities():
 
     root = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         allow_git=False,
@@ -205,7 +205,6 @@ def test_runtime_guidance_matches_agent_capabilities():
 
     guided = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         delegation_prompt=True,
@@ -214,7 +213,6 @@ def test_runtime_guidance_matches_agent_capabilities():
     )
     appended = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         allow_git=False,
@@ -226,7 +224,6 @@ def test_runtime_guidance_matches_agent_capabilities():
     assert guided.index(DELEGATION_PROMPT) < guided.index("## Agent context")
     guided_leaf = build_system_prompt(
         "/repo",
-        None,
         [],
         depth=1,
         allow_recursion=False,
@@ -255,3 +252,65 @@ async def test_wait_registration_matches_runtime_capability(session, tool):
         assert ("wait" in registered) == (tool == "ipython")
     finally:
         await engine.aclose()
+
+
+def test_skill_docs_are_listed_with_name_description_and_file(tmp_path):
+    root = tmp_path / "skills"
+    (root / "codeword").mkdir(parents=True)
+    (root / "codeword" / "SKILL.md").write_text(
+        "---\nname: project-codeword\ndescription: Look up the\n  project codeword.\n---\n\nbody\n"
+    )
+    (root / "plain").mkdir()
+    (root / "plain" / "SKILL.md").write_text("# no frontmatter\n")
+
+    docs = discover_skill_docs(root)
+
+    assert [(d.name, d.description) for d in docs] == [
+        ("project-codeword", "Look up the project codeword."),
+        ("plain", ""),
+    ]
+    prompt = build_system_prompt(
+        "/repo",
+        ["edit"],
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+        skill_docs=docs,
+    )
+    assert "## Skills" in prompt
+    assert "Python tools (pre-imported): `edit`" in prompt
+    assert "Installed skills (pre-imported)" not in prompt
+    assert (
+        f"- project-codeword: Look up the project codeword. "
+        f"(file: {root / 'codeword' / 'SKILL.md'})"
+    ) in prompt
+    assert f"- plain: (file: {root / 'plain' / 'SKILL.md'})" in prompt
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "---\nname: broken\n",
+        "---\nname: [unclosed\n---\n",
+        "---\n- a\n- b\n---\n",
+    ],
+    ids=["unclosed-fence", "invalid-yaml", "non-mapping"],
+)
+def test_malformed_frontmatter_falls_back_to_the_folder_name(tmp_path, text):
+    (tmp_path / "skill").mkdir()
+    (tmp_path / "skill" / "SKILL.md").write_text(text)
+
+    (doc,) = discover_skill_docs(tmp_path)
+
+    assert (doc.name, doc.description) == ("skill", "")
+
+
+def test_dashes_inside_frontmatter_values_are_kept(tmp_path):
+    (tmp_path / "skill").mkdir()
+    (tmp_path / "skill" / "SKILL.md").write_text(
+        "---\nname: dashes\ndescription: before --- after\n---\nbody\n"
+    )
+
+    (doc,) = discover_skill_docs(tmp_path)
+
+    assert doc.description == "before --- after"
