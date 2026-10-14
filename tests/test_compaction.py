@@ -618,6 +618,56 @@ def _work(prompt_tokens: int = 200) -> DummyResponse:
     )
 
 
+async def test_compaction_preserves_skills_announced_after_the_prompt(
+    session, tmp_path, monkeypatch
+):
+    root = tmp_path / "skills"
+    monkeypatch.setattr("rlm.engine.SKILLS_ROOT", root)
+    write_skill = (
+        "from pathlib import Path\n"
+        f"skill = Path({str(root)!r}) / 'greeter'\n"
+        "skill.mkdir(parents=True)\n"
+        "(skill / 'SKILL.md').write_text("
+        "'---\\nname: greeter\\ndescription: Greet people by name\\n---\\n')\n"
+    )
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(
+                    tool_calls=[DummyToolCall("ipython", {"code": write_skill})]
+                )
+            ),
+            _work(prompt_tokens=50_000),
+            _response(DummyMessage(content="branch summary")),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summarize_at_tokens=40_000),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    line = f"- greeter: Greet people by name (file: {root / 'greeter' / 'SKILL.md'})"
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 1
+    assert "- greeter:" not in client.calls[0]["messages"][0]["content"]
+    assert line in client.calls[1]["messages"][-1]["content"]
+    checkpoint = client.calls[2]["messages"][-1]["content"]
+    assert (
+        "Preserve these skills, added after the system prompt was built" in checkpoint
+    )
+    assert line in checkpoint
+    # Announced once: the compacted window keeps the original notice in its verbatim
+    # tail and gets no second one.
+    final = [str(m.get("content")) for m in client.calls[3]["messages"]]
+    assert sum('<runtime_event kind="skills">' in c for c in final) == 1
+
+
 async def test_staircase_rolls_up_branch_summaries(session):
     client = _ScriptedClient(
         [
