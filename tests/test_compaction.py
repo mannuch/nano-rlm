@@ -668,6 +668,59 @@ async def test_compaction_preserves_skills_announced_after_the_prompt(
     assert sum('<runtime_event kind="skills">' in c for c in final) == 1
 
 
+async def test_failed_turn_rolls_back_a_skill_notice_and_resends_it(
+    session, tmp_path, monkeypatch
+):
+    root = tmp_path / "skills"
+    monkeypatch.setattr("rlm.engine.SKILLS_ROOT", root)
+    write_skill = (
+        "from pathlib import Path\n"
+        f"skill = Path({str(root)!r}) / 'greeter'\n"
+        "skill.mkdir(parents=True)\n"
+        "(skill / 'SKILL.md').write_text('# greeter\\n')\n"
+    )
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(
+                    tool_calls=[DummyToolCall("ipython", {"code": write_skill})]
+                )
+            ),
+            RuntimeError("model failed"),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="model failed"):
+            await engine.prompt("write a skill")
+        result = await engine.prompt("again")
+    finally:
+        await engine.aclose()
+
+    def notices(call: dict) -> list[str]:
+        return [
+            str(m.get("content"))
+            for m in call["messages"]
+            if '<runtime_event kind="skills">' in str(m.get("content"))
+        ]
+
+    line = f"- greeter: (file: {root / 'greeter' / 'SKILL.md'})"
+    assert result.answer == "done"
+    # The failed turn's notice is rolled back with its context, so the next turn
+    # announces the skill again, once.
+    assert [line in n for n in notices(client.calls[1])] == [True]
+    assert all(
+        "write a skill" not in str(m.get("content"))
+        for m in client.calls[2]["messages"]
+    )
+    assert [line in n for n in notices(client.calls[2])] == [True]
+
+
 async def test_staircase_rolls_up_branch_summaries(session):
     client = _ScriptedClient(
         [
