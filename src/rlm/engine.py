@@ -58,7 +58,14 @@ from rlm.harness import (
 )
 from rlm.semantic import Compaction, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
-from rlm.prompt import build_system_prompt, render_harness, resolve_prompts
+from rlm.prompt import (
+    NEW_SKILLS_LOAD_HINT,
+    NEW_SKILLS_NOTICE,
+    build_system_prompt,
+    new_skill_line,
+    render_harness,
+    resolve_prompts,
+)
 from rlm.refine_judge import RefineJudge, build_evidence
 from rlm.refinement import (
     AUTO_REFINE_NOTE,
@@ -380,6 +387,11 @@ class RLMEngine:
         self._steering_ready = asyncio.Event()
         self._pending_kernel_notices: list[str] = []
         self._prompt_kernel_notices: list[str] = []
+        # The SKILL.md paths known to this agent: listed in its system prompt's Skills
+        # section or announced since. Announced lines are kept through compaction until
+        # the prompt is rebuilt.
+        self._known_skills: frozenset[str] = frozenset()
+        self._new_skill_lines: list[str] = []
 
         # Where the current branch (the context since the last compaction) begins:
         # its first turn, ledger message index, and context window. A compaction
@@ -564,6 +576,7 @@ class RLMEngine:
         branch_first_before = (self._branch_first_index, self._branch_first_window)
         staircase_before = self._staircase.snapshot()
         pinned_before = self._pinned_prompt
+        skills_before = (self._known_skills, list(self._new_skill_lines))
         compacted_before = self._compacted
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
@@ -660,6 +673,7 @@ class RLMEngine:
                 )
                 self._staircase.restore(staircase_before)
                 self._pinned_prompt = pinned_before
+                self._known_skills, self._new_skill_lines = skills_before
                 self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
                 self._turn = turn_before
                 self._metrics.stop_reason = (
@@ -859,6 +873,28 @@ class RLMEngine:
             )
             self._prompt_kernel_notices.append(notice)
 
+    def _announce_new_skills(self) -> None:
+        """Tell the model about skills added under the skills root since its system
+        prompt was built, once each: the prompt is not rebuilt just to list them."""
+        new = [
+            doc
+            for doc in discover_skill_docs(SKILLS_ROOT)
+            if doc.location not in self._known_skills
+        ]
+        if not new:
+            return
+        self._known_skills |= {doc.location for doc in new}
+        lines = [new_skill_line(doc) for doc in new]
+        self._new_skill_lines.extend(lines)
+        text = NEW_SKILLS_NOTICE % {"skills": "\n".join(lines)}
+        if self._skills_dir is not None:
+            text += "\n" + NEW_SKILLS_LOAD_HINT
+        message, provenance = runtime_event("skills", text)
+        self.session.log(
+            {"type": "skills_notice", "message": message, "provenance": provenance},
+            in_context=True,
+        )
+
     def _deliver_supervisor_input(
         self, *, include_queue: bool = False, notify: bool = True
     ) -> bool:
@@ -936,6 +972,7 @@ class RLMEngine:
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
             await self._refine_at_boundary()
+            self._announce_new_skills()
             messages = self.session.messages
             self._turn = turn + 1
             try:
@@ -1583,6 +1620,11 @@ class RLMEngine:
             checkpoint_prompt += (
                 "\n\nPreserve this latest kernel recovery warning in the continuation summary:\n"
                 + self._prompt_kernel_notices[-1]
+            )
+        if self._new_skill_lines:
+            checkpoint_prompt += (
+                "\n\nPreserve these skills, added after the system prompt was built, in the "
+                "continuation summary:\n" + "\n".join(self._new_skill_lines)
             )
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
@@ -2314,6 +2356,9 @@ class RLMEngine:
     def _load_system_prompt(
         self, active_tools: list[BuiltinTool], task_text: str = ""
     ) -> str:
+        skill_docs = discover_skill_docs(SKILLS_ROOT)
+        self._known_skills = frozenset(doc.location for doc in skill_docs)
+        self._new_skill_lines = []
         return build_system_prompt(
             self.cwd,
             discover_skills(self.session.dir, self._skills_dir),
@@ -2324,7 +2369,7 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
-            skill_docs=discover_skill_docs(SKILLS_ROOT),
+            skill_docs=skill_docs,
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,

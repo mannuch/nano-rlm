@@ -501,6 +501,17 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
     # The root did not exist when the prompt was built; the next build's scan finds it.
     assert "- greeter:" not in client.calls[0]["messages"][0]["content"]
     assert [doc.name for doc in discover_skill_docs(root)] == ["greeter"]
+    # Meanwhile the next model step announces it once, with the load hint.
+    notices = [
+        m["content"]
+        for m in client.calls[1]["messages"]
+        if '<runtime_event kind="skills">' in str(m.get("content"))
+    ]
+    assert len(notices) == 1
+    assert f"- greeter: (file: {root / 'greeter' / 'SKILL.md'})" in notices[0]
+    assert 'rlm.harness.load_skills("<name>")' in notices[0]
+    later = [str(m.get("content")) for m in client.calls[2]["messages"]]
+    assert sum('<runtime_event kind="skills">' in c for c in later) == 1
 
 
 def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):

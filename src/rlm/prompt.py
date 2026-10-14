@@ -687,6 +687,21 @@ def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
     return SKILLS_PROMPT.format(skills=lines)
 
 
+NEW_SKILLS_NOTICE = """New skills were added after your system prompt was built. Each is \
+listed as in the Skills section; read its `SKILL.md` before using it.
+%(skills)s"""
+
+NEW_SKILLS_LOAD_HINT = """A skill that ships a Python tool another agent wrote is not \
+in this kernel yet: bind it with `rlm.harness.load_skills("<name>")`."""
+
+
+def new_skill_line(doc: "SkillDoc") -> str:
+    """One skill as the Skills section lists it, for a skill added after the prompt."""
+    if doc.description:
+        return f"- {doc.name}: {doc.description} (file: {doc.location})"
+    return f"- {doc.name}: (file: {doc.location})"
+
+
 def _should_include_git_history_guard(
     active_tools: list["BuiltinTool"], allow_git: bool
 ) -> bool:

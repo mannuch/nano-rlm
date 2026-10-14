@@ -568,7 +568,12 @@ reloads and rebinds it exactly as kernel start does and returns `{name: reason}`
 The `## Skills` catalog scans the root each time a system prompt is built, so a skill
 written mid-session, with `name` and `description` frontmatter, is listed for sub-agents
 spawned afterwards, for later sessions, and for the authoring agent once a refinement
-rebuilds its prompt. The authoring agent reaches it through `load_skills` in the meantime.
+rebuilds its prompt. Until then, every running agent is told at its next model step: a
+`<runtime_event kind="skills">` lists each skill added after its prompt was built, once,
+in the catalog's line format. With `author_skills` on, it also says that a tool another
+agent wrote is bound with `load_skills`. Compaction keeps the announced skills in the
+continuation summary until the prompt is rebuilt. The prompt is not rebuilt just to list
+them, which would discard the prompt cache.
 A package that `install.sh` installed from the root, editable from its own folder, is an
 installed Python tool rather than an authored one: it is pre-imported from the venv,
 `load_skills` declines to rebind it, and edits take effect at the next kernel start. A
