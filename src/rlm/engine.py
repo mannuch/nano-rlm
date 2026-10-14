@@ -79,7 +79,7 @@ from rlm.staircase import Block, Staircase, select_tail
 from rlm.skills import enable_builtin_skills
 from rlm.supervisor import SessionTreeSupervisor
 from rlm.tools import (
-    SKILLS_DIR,
+    SKILLS_ROOT,
     BuiltinTool,
     IPythonREPL,
     ToolContext,
@@ -300,7 +300,11 @@ class RLMEngine:
         self.allow_git = config.policy.allow_git
         self.harness_config = config.harness
         self._harness: HarnessView | None = None
-        self._skills_dir = config.harness.skills_dir if config.harness.enabled else None
+        self._skills_dir = (
+            str(SKILLS_ROOT)
+            if config.harness.enabled and config.harness.author_skills
+            else None
+        )
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -755,7 +759,7 @@ class RLMEngine:
                 str(self._harness.global_.dir) if self._harness.global_ else ""
             )
             harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
-            harness_dirs[SKILLS_DIR_ENV] = self.harness_config.skills_dir or ""
+            harness_dirs[SKILLS_DIR_ENV] = self._skills_dir or ""
 
         self._repl = IPythonREPL(
             cwd=self.cwd,
@@ -1899,7 +1903,7 @@ class RLMEngine:
                 "refine_cooldown_seconds": self.harness_config.refine_cooldown_seconds,
                 "max_refinements": self.harness_config.max_refinements,
                 "max_refinement_attempts": self.harness_config.max_refinement_attempts,
-                "harness_skills_dir": self._skills_dir is not None,
+                "harness_author_skills": self._skills_dir is not None,
                 "record_episodes": self.harness_config.record_episodes,
                 "prompt_overrides": sorted(self.runtime_config.prompt_overrides),
             },
@@ -2320,7 +2324,7 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
-            skill_docs=discover_skill_docs(SKILLS_DIR) if SKILLS_DIR else [],
+            skill_docs=discover_skill_docs(SKILLS_ROOT),
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,

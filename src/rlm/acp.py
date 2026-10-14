@@ -136,7 +136,7 @@ class _LimitsSnapshot(_ContractModel):
     refine_cooldown_seconds: int = Field(ge=0)
     max_refinements: int | None = Field(default=None, gt=0)
     max_refinement_attempts: int = Field(gt=0)
-    harness_skills_dir: bool
+    harness_author_skills: bool
     record_episodes: bool
     prompt_overrides: list[str]
 

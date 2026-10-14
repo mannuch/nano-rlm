@@ -170,7 +170,7 @@ class _Engine:
                 "refine_cooldown_seconds": 300,
                 "max_refinements": None,
                 "max_refinement_attempts": 3,
-                "harness_skills_dir": False,
+                "harness_author_skills": False,
                 "record_episodes": False,
                 "prompt_overrides": [],
             },

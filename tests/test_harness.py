@@ -7,6 +7,7 @@ import re
 
 import pytest
 from conftest import (
+    SKILL_FIXTURES_DIR,
     DummyClient,
     DummyMessage,
     DummyToolCall,
@@ -28,6 +29,7 @@ from rlm.harness import (
 )
 from rlm.prompt import HARNESS_INTRO, render_harness
 from rlm.session import Session
+from rlm.tools.skills import discover_skill_docs
 from rlm.supervisor import SessionTreeSupervisor
 from rlm.types import RLMResult
 
@@ -376,6 +378,8 @@ def test_list_authored_skills_checks_the_contract_without_importing(tmp_path):
         '[project]\nname = "rlm-skill-good_name"\n'
     )
     (root / "not a package").mkdir()
+    (root / "pdf-tools" / "scripts").mkdir(parents=True)  # an instruction-only skill
+    (root / "pdf-tools" / "SKILL.md").write_text("---\nname: pdf-tools\n---\n")
 
     skills = {s.name: s for s in list_authored_skills(root)}
     assert set(skills) == {"word_count", "no_md", "flat", "bad_name", "good_name"}
@@ -391,10 +395,16 @@ def test_list_authored_skills_checks_the_contract_without_importing(tmp_path):
     _write_package(root, "say", "async def run(s: str) -> str: ...\n")
     with pytest.raises(ValueError, match="installed and authored: say"):
         discover_skills(None, root)
+    # The fixture packages are editable-installed from this directory, as install.sh
+    # installs from the skills root, so they are installed tools rather than authored.
+    assert list_authored_skills(SKILL_FIXTURES_DIR) == []
 
 
-async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path):
+async def test_authored_packages_are_importable_in_the_kernel(
+    session, tmp_path, monkeypatch
+):
     root = tmp_path / "skills"
+    monkeypatch.setattr("rlm.engine.SKILLS_ROOT", root)
     _write_package(
         root,
         "word_count",
@@ -421,7 +431,7 @@ async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path)
             DummyMessage(content="ok"),
         ]
     )
-    config = make_runtime_config(harness=HarnessConfig(skills_dir=str(root)))
+    config = make_runtime_config(harness=HarnessConfig(author_skills=True))
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
     await engine.run("use the authored skill")
@@ -438,14 +448,15 @@ async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path)
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert "`word_count`" in system_prompt and "`broken`" in system_prompt
     assert f"persist across sessions under {root}" in system_prompt
-    assert engine.execution_snapshot()["limits"]["harness_skills_dir"] is True
+    assert f"- word_count: (file: {root / 'word_count' / 'SKILL.md'})" in system_prompt
+    assert engine.execution_snapshot()["limits"]["harness_author_skills"] is True
 
 
 async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
-    session, tmp_path
+    session, tmp_path, monkeypatch
 ):
     root = tmp_path / "skills"
-    root.mkdir()
+    monkeypatch.setattr("rlm.engine.SKILLS_ROOT", root)
     write_package = (
         "from pathlib import Path\n"
         f"pkg = Path({str(root)!r}) / 'greeter' / 'src' / 'greeter'\n"
@@ -474,7 +485,7 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
             DummyMessage(content="ok"),
         ]
     )
-    config = make_runtime_config(harness=HarnessConfig(skills_dir=str(root)))
+    config = make_runtime_config(harness=HarnessConfig(author_skills=True))
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
     await engine.run("author a skill")
@@ -487,6 +498,9 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
     assert "{'greeter': None}" in output and "bye ann" in output
     assert "(name: str)" in output
     assert "programmatic_tool_calls.jsonl" in {p.name for p in session.dir.iterdir()}
+    # The root did not exist when the prompt was built; the next build's scan finds it.
+    assert "- greeter:" not in client.calls[0]["messages"][0]["content"]
+    assert [doc.name for doc in discover_skill_docs(root)] == ["greeter"]
 
 
 def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):

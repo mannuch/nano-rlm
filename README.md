@@ -442,7 +442,7 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "max_refinements": null,
   "max_refinement_attempts": 3,
   "refine_judge": null,
-  "skills_dir": null,
+  "author_skills": false,
   "record_episodes": false
 }
 ```
@@ -513,10 +513,10 @@ Python tool, and a harness `skill` entry is a skill kept as harness state:
 
 |                 | Installed Python tool                      | Authored skill                                                | Harness `skill` entry                                                                                                   |
 | --------------- | ------------------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| What it is      | A Python package installed into rlm's venv | A Python package under `skills_dir`, imported from `sys.path` | A JSON record in `harness_state.json`                                                                                   |
+| What it is      | A Python package installed into rlm's venv | A Python package under `$RLM_HOME/skills`, on `sys.path`      | A JSON record in `harness_state.json`                                                                                   |
 | Contains        | Code: `async def run(...)`                 | Code: `async def run(...)`                                    | Text: title, when/how to call something, a `reference` (`import`, `callable`, `call_pattern`) and an `arguments` schema |
 | Created by      | A human, via `install.sh` at image build   | The agent, mid-session, by writing files                      | The agent (`h.create_skill(...)`) or the refinement pass                                                                |
-| Lives           | The venv; every session                    | `<skills_dir>/<name>/`; every session sharing that dir        | One store: session-local, an ancestor's, or global                                                                      |
+| Lives           | The venv; every session                    | `$RLM_HOME/skills/<name>/`; sessions sharing `RLM_HOME`       | One store: session-local, an ancestor's, or global                                                                      |
 | The kernel sees | `await websearch(...)`                     | `await greeter(...)`                                          | Nothing executable; it is rendered into the system prompt                                                               |
 | Refinement can  | Never touch it                             | Never touch it                                                | Create, update, delete, roll back                                                                                       |
 
@@ -541,14 +541,15 @@ entry in their system prompt with the package already pre-imported.
 
 ### Authored skills
 
-`skills_dir` gives agent-written skills a place that survives the session. An authored
-skill is a `SKILL.md` that ships a Python tool package. The
+`author_skills` lets the agent write skills that survive the session into the skills root,
+`$RLM_HOME/skills`, which also holds the host's [skills](#skills) and Python tool packages.
+An authored skill is a `SKILL.md` that ships a Python tool package. The
 [package contract](#python-tool-package-contract) applies, minus installation, with these
 adjustments:
 
-- Required: `<skills_dir>/<name>/SKILL.md` and `<skills_dir>/<name>/src/<name>/__init__.py`
-  defining `async def run(...)`. The kernel checks both; `run`'s docstring falls back to
-  `SKILL.md` for `help(<name>)`.
+- Required: `$RLM_HOME/skills/<name>/SKILL.md` and
+  `$RLM_HOME/skills/<name>/src/<name>/__init__.py` defining `async def run(...)`. The kernel
+  checks both; `run`'s docstring falls back to `SKILL.md` for `help(<name>)`.
 - Optional: `pyproject.toml`; when present its `[project] name` must be `rlm-skill-<name>`
   so the package can be promoted to an installed Python tool unchanged. Nothing is installed, so
   dependencies are limited to what is already in the kernel venv and there is no console
@@ -562,8 +563,20 @@ Python tools or the built-in Python tools the session generates from the contrac
 without a restart by `rlm.harness.load_skills("<name>")` (no names = all), which
 reloads and rebinds it exactly as kernel start does and returns `{name: reason}` with
 `None` for a usable tool. The system prompt states the contract and this workflow;
-`RLM_HARNESS_SKILLS_DIR` names the directory. `null` (the default) keeps authored
-packages session-local.
+`RLM_HARNESS_SKILLS_DIR` names the directory.
+
+The `## Skills` catalog scans the root each time a system prompt is built, so a skill
+written mid-session, with `name` and `description` frontmatter, is listed for sub-agents
+spawned afterwards, for later sessions, and for the authoring agent once a refinement
+rebuilds its prompt. The authoring agent reaches it through `load_skills` in the meantime.
+A package that `install.sh` installed from the root, editable from its own folder, is an
+installed Python tool rather than an authored one: it is pre-imported from the venv,
+`load_skills` declines to rebind it, and edits take effect at the next kernel start. A
+folder with no `src/`, `pyproject.toml` or `__init__.py` is an instruction-only skill and is
+never loaded as a package.
+
+`author_skills` is off by default, and no authored packages load. Leave it off when RL
+rollouts share an `RLM_HOME`: one rollout's skills would reach the next.
 
 ### Refinement
 

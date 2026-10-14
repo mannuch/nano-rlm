@@ -432,7 +432,8 @@ evidence-backed."""
 HARNESS_SKILLS_DIR_PROMPT = """Authored skills persist across sessions under %(skills_dir)s. Each is a skill folder that
 ships a Python tool, pre-imported by name at kernel start, and follows the Python tool
 package contract minus installation:
-`%(skills_dir)s/<name>/SKILL.md` (what the tool does and how to call it) and
+`%(skills_dir)s/<name>/SKILL.md` (`name` and `description` frontmatter, which list it under
+Skills for agents started afterwards, then what the tool does and how to call it) and
 `%(skills_dir)s/<name>/src/<name>/__init__.py` defining `async def run(...)` with typed
 keyword arguments and a Google-style docstring; an optional `pyproject.toml` must name the
 distribution `rlm-skill-<name>`. Use only packages already in the kernel venv (no pip). A

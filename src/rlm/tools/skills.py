@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -9,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -87,9 +89,38 @@ def _check_authored(package_dir: Path, name: str) -> tuple[str | None, str | Non
     return str(skill_md), None
 
 
+def _is_package_dir(path: Path) -> bool:
+    """Whether ``path`` holds Python package files rather than only ``SKILL.md``
+    instructions and their scripts or references."""
+    return (
+        (path / "src").is_dir()
+        or (path / "pyproject.toml").is_file()
+        or (path / "__init__.py").is_file()
+    )
+
+
+def _installed_from(package_dir: Path) -> bool:
+    """Whether ``install.sh`` installed this package from ``package_dir`` itself, as an
+    editable distribution: it is then an installed Python tool, not an authored one."""
+    try:
+        dist = metadata.distribution(f"rlm-skill-{package_dir.name}")
+    except metadata.PackageNotFoundError:
+        return False
+    direct_url = dist.read_text("direct_url.json")
+    if direct_url is None:
+        return False
+    url = urlparse(json.loads(direct_url).get("url", ""))
+    return (
+        url.scheme == "file"
+        and Path(unquote(url.path)).resolve() == package_dir.resolve()
+    )
+
+
 def list_authored_skills(skills_dir: str | Path | None) -> list[AuthoredSkill]:
     """Agent-authored packages under ``skills_dir``, one per subdirectory whose name
-    is an identifier (hyphens map to underscores, as for installed skills)."""
+    is an identifier (hyphens map to underscores, as for installed skills) and that holds
+    package files. Instruction-only skills share the directory and are skipped, and a
+    package installed from its own directory is left to the installed listing."""
     if skills_dir is None:
         return []
     root = Path(skills_dir)
@@ -98,7 +129,12 @@ def list_authored_skills(skills_dir: str | Path | None) -> list[AuthoredSkill]:
     authored: list[AuthoredSkill] = []
     for package_dir in sorted(root.iterdir()):
         name = _normalize_skill_name(package_dir.name)
-        if not package_dir.is_dir() or not name.isidentifier():
+        if (
+            not package_dir.is_dir()
+            or not name.isidentifier()
+            or not _is_package_dir(package_dir)
+            or _installed_from(package_dir)
+        ):
             continue
         skill_md, error = _check_authored(package_dir, name)
         authored.append(AuthoredSkill(name, str(package_dir / "src"), skill_md, error))
