@@ -422,7 +422,7 @@ the session's `messages.jsonl` records the `global_dir` it published to. Nothing
 
 The continual harness is durable state that supplements the immutable system prompt: `prompt`
 notes (narrow behavioural policies), `memory` entries (facts, decisions, failures), `skill`
-entries (descriptions of how to call an importable module, with a `reference` and an
+entries (how to use an importable Python tool, with a `reference` and an
 `arguments` contract), `subagent` specs (reusable delegation roles) and, in a global store,
 `episode` records of past sessions written by the engine (see [Episodes](#episodes)). Each agent's local
 store lives at `<session>/harness/harness_state.json`. A child reads its ancestors' local
@@ -442,7 +442,7 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "max_refinements": null,
   "max_refinement_attempts": 3,
   "refine_judge": null,
-  "skills_dir": null,
+  "author_skills": false,
   "record_episodes": false
 }
 ```
@@ -471,7 +471,7 @@ h.update_memory("project_venv", "Project venv", "...", global_=True)   # needs g
 
 `update_*`/`delete_*` take the bare id or a `local:`/`global:` prefix; ancestor entries raise
 `PermissionError`. Every method carries a docstring, so `help(h)` (or `help(h.create_skill)`) is
-the full reference; the system prompt only lists the essential calls. A `skill` entry describes an already-importable module; it is not a
+the full reference; the system prompt only lists the essential calls. A `skill` entry describes how to use an already-importable Python tool; it is not a
 package (see [Python tool package contract](#python-tool-package-contract) for the on-disk package contract). Stores are rewritten
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
@@ -505,22 +505,24 @@ A violation raises `ValueError` naming the field (`arguments.queries: Input shou
 valid dictionary ...`) from the kernel API, is reported per edit by a refinement pass, and
 fails `load()` with the store path and entry id when a state file is inconsistent.
 
-### Skill entries versus skill packages
+### Skill entries versus Python tools
 
-Three things share the word "skill", and they are different kinds of object:
+The harness works with three kinds of object. In the [Tools](#tools) and [Skills](#skills)
+terms, an installed package is a Python tool, an authored package is a skill that ships a
+Python tool, and a harness `skill` entry is a skill kept as harness state:
 
-|                 | Installed skill                            | Authored skill package                                        | Harness `skill` entry                                                                                                   |
+|                 | Installed Python tool                      | Authored skill                                                | Harness `skill` entry                                                                                                   |
 | --------------- | ------------------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| What it is      | A Python package installed into rlm's venv | A Python package under `skills_dir`, imported from `sys.path` | A JSON record in `harness_state.json`                                                                                   |
+| What it is      | A Python package installed into rlm's venv | A Python package under `$RLM_HOME/skills`, on `sys.path`      | A JSON record in `harness_state.json`                                                                                   |
 | Contains        | Code: `async def run(...)`                 | Code: `async def run(...)`                                    | Text: title, when/how to call something, a `reference` (`import`, `callable`, `call_pattern`) and an `arguments` schema |
 | Created by      | A human, via `install.sh` at image build   | The agent, mid-session, by writing files                      | The agent (`h.create_skill(...)`) or the refinement pass                                                                |
-| Lives           | The venv; every session                    | `<skills_dir>/<name>/`; every session sharing that dir        | One store: session-local, an ancestor's, or global                                                                      |
+| Lives           | The venv; every session                    | `$RLM_HOME/skills/<name>/`; sessions sharing `RLM_HOME`       | One store: session-local, an ancestor's, or global                                                                      |
 | The kernel sees | `await websearch(...)`                     | `await greeter(...)`                                          | Nothing executable; it is rendered into the system prompt                                                               |
 | Refinement can  | Never touch it                             | Never touch it                                                | Create, update, delete, roll back                                                                                       |
 
 The relationship is pointer to target. An entry's `reference.import` names a module that
-must already be importable (an installed skill, an authored package, an MCP proxy module,
-or `rlm` itself); apply-time validation rejects an entry that points anywhere else. The
+must already be importable (an installed Python tool, an authored skill's tool, a
+built-in Python tool from the contract's `skills` list, or `rlm` itself); apply-time validation rejects an entry that points anywhere else. The
 entry adds what code cannot carry: when this call is the right move, which arguments
 matter for a kind of task, gotchas learned from use. One package can be described by
 several entries, and a package with no entry is still callable, just not surfaced as a
@@ -537,30 +539,48 @@ not a broken kernel. The typical arc is: notice a repeated procedure, write a pa
 `load_skills` and test it, record a `skill` entry pointing at it; future sessions see the
 entry in their system prompt with the package already pre-imported.
 
-### Authored skill packages
+### Authored skills
 
-`skills_dir` gives agent-written packages a place that survives the session. An authored
-package is an installed skill minus installation — the [package contract](#python-tool-package-contract)
-applies with these adjustments:
+`author_skills` lets the agent write skills that survive the session into the skills root,
+`$RLM_HOME/skills`, which also holds the host's [skills](#skills) and Python tool packages.
+An authored skill is a `SKILL.md` that ships a Python tool package. The
+[package contract](#python-tool-package-contract) applies, minus installation, with these
+adjustments:
 
-- Required: `<skills_dir>/<name>/SKILL.md` and `<skills_dir>/<name>/src/<name>/__init__.py`
-  defining `async def run(...)`. The kernel checks both; `run`'s docstring falls back to
-  `SKILL.md` for `help(<name>)`.
+- Required: `$RLM_HOME/skills/<name>/SKILL.md` and
+  `$RLM_HOME/skills/<name>/src/<name>/__init__.py` defining `async def run(...)`. The kernel
+  checks both; `run`'s docstring falls back to `SKILL.md` for `help(<name>)`.
 - Optional: `pyproject.toml`; when present its `[project] name` must be `rlm-skill-<name>`
-  so the package can be promoted to an installed skill unchanged. Nothing is installed, so
+  so the package can be promoted to an installed Python tool unchanged. Nothing is installed, so
   dependencies are limited to what is already in the kernel venv and there is no console
   script: authored packages are IPython-only.
 
 At kernel start every authored package's `src/` goes on `sys.path` and the module is
-pre-imported by name with the same `await <name>(...)` wrapper as an installed skill. A
+pre-imported by name with the same `await <name>(...)` wrapper as an installed Python tool. A
 package that breaks the contract or fails to import binds a placeholder whose call raises
 the reason, so a bad package never breaks the kernel. Names must not collide with installed
-Python tools or the supervisor's generated `search` module. A package written or edited during the session is brought in
+Python tools or the built-in Python tools the session generates from the contract's `skills` list. A package written or edited during the session is brought in
 without a restart by `rlm.harness.load_skills("<name>")` (no names = all), which
 reloads and rebinds it exactly as kernel start does and returns `{name: reason}` with
-`None` for a usable skill. The system prompt states the contract and this workflow;
-`RLM_HARNESS_SKILLS_DIR` names the directory. `null` (the default) keeps authored
-packages session-local.
+`None` for a usable tool. The system prompt states the contract and this workflow;
+`RLM_HARNESS_SKILLS_DIR` names the directory.
+
+The `## Skills` catalog scans the root each time a system prompt is built, so a skill
+written mid-session, with `name` and `description` frontmatter, is listed for sub-agents
+spawned afterwards, for later sessions, and for the authoring agent once a refinement
+rebuilds its prompt. Until then, every running agent is told at its next model step: a
+`<runtime_event kind="skills">` lists each skill added after its prompt was built, once,
+in the catalog's line format. With `author_skills` on, it also says that a tool another
+agent wrote is bound with `load_skills`. Compaction keeps the announced skills in the
+continuation summary until the prompt is rebuilt. The prompt is not rebuilt just to list
+them, which would discard the prompt cache.
+A package that `install.sh` installed from the root, editable from its own folder, is an
+installed Python tool rather than an authored one: it is pre-imported from the venv,
+`load_skills` declines to rebind it, and edits take effect at the next kernel start. A
+folder with no `src/`, `pyproject.toml` or `__init__.py` is an instruction-only skill and is
+never loaded as a package.
+
+`author_skills` is off by default, and no authored packages load.
 
 ### Refinement
 

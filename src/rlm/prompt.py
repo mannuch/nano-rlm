@@ -398,8 +398,8 @@ instructions and evidence by searching/selectively printing records, not the ent
 
 
 HARNESS_INTRO = """## Continual harness
-Supplemental state that outlives single conversations: prompt notes, memories, skill
-descriptions and sub-agent specs. Local entries belong to this session; ancestor entries
+Supplemental state that outlives single conversations: prompt notes, memories, skills
+(how to use an importable Python tool) and sub-agent specs. Local entries belong to this session; ancestor entries
 are your parents' local entries (read-only); global entries persist across sessions. The
 lines below are compact summaries used as routing hints, not full descriptions. The base
 system prompt is immutable; prompt entries are supplemental notes only. Local entries are
@@ -413,7 +413,7 @@ Python API (`h` is not predefined, bind it yourself in a cell). Read with
 exactly as shown: `local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting component:
 `h.create_memory(title, content)` for facts, decisions and failures;
 `h.create_prompt_note(title, content)` for a narrow policy; `h.create_skill(title,
-content, reference={...}, arguments={...})` to describe an importable module;
+content, reference={...}, arguments={...})` for a skill: how to use an importable Python tool;
 `h.create_subagent(title, content)` for a delegation role. `help(h)` documents
 `update_*`/`delete_*`, `global_=True`, the skill payload contract and `episode` entries
 (past sessions: `h.list("episode")` finds them and
@@ -425,22 +425,24 @@ failure repeats, a tactic proves reusable, a delegation role or procedure recurs
 sub-agent spec or skill), a fact or preference should outlive this session (a memory), a
 narrow behavioural rule should persist (a prompt note), a user corrects you, or an existing
 entry turns out to be wrong; use `create_*` when you already know the exact entry. Do not
-invent wrappers such as `call_skill(...)` or `run_subagent(...)`: skills are pre-imported
-modules and sub-agents are spawned with `rlm.agent.spawn`. Keep entries small and
+invent wrappers such as `call_skill(...)` or `run_subagent(...)`: a skill's Python tool is
+pre-imported, so call it directly, and sub-agents are spawned with `rlm.agent.spawn`. Keep entries small and
 evidence-backed."""
 
-HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are pre-imported
-by name at kernel start. They follow the installed-skill contract minus installation:
-`%(skills_dir)s/<name>/SKILL.md` (what it does and how to call it) and
+HARNESS_SKILLS_DIR_PROMPT = """Authored skills persist across sessions under %(skills_dir)s. Each is a skill folder that
+ships a Python tool, pre-imported by name at kernel start, and follows the Python tool
+package contract minus installation:
+`%(skills_dir)s/<name>/SKILL.md` (`name` and `description` frontmatter, which list it under
+Skills for agents started afterwards, then what the tool does and how to call it) and
 `%(skills_dir)s/<name>/src/<name>/__init__.py` defining `async def run(...)` with typed
 keyword arguments and a Google-style docstring; an optional `pyproject.toml` must name the
 distribution `rlm-skill-<name>`. Use only packages already in the kernel venv (no pip). A
 package that breaks the contract or fails to import binds a placeholder whose call explains
 the problem. After writing or editing a package, `rlm.harness.load_skills("<name>")`
-(re)loads it into this kernel and returns `{name: reason_or_None}`; test it with
+(re)loads its tool into this kernel and returns `{name: reason_or_None}`; test it with
 `await <name>(...)` before recording `h.create_skill(...)` with `reference={"type":
 "python", "import": "<name>", "callable": "run", "call_pattern": "await <name>(...)"}`:
-the entry describes how to use the package; the package is the code."""
+the entry describes how to use the tool; the package is the code."""
 
 HARNESS_SPAWN_HINT = (
     "(invoke a spec by turning it into a concise task prompt and spawning with "
@@ -683,6 +685,21 @@ def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
         for doc in skill_docs
     )
     return SKILLS_PROMPT.format(skills=lines)
+
+
+NEW_SKILLS_NOTICE = """New skills were added after your system prompt was built. Each is \
+listed as in the Skills section; read its `SKILL.md` before using it.
+%(skills)s"""
+
+NEW_SKILLS_LOAD_HINT = """A skill that ships a Python tool another agent wrote is not \
+in this kernel yet: bind it with `rlm.harness.load_skills("<name>")`."""
+
+
+def new_skill_line(doc: "SkillDoc") -> str:
+    """One skill as the Skills section lists it, for a skill added after the prompt."""
+    if doc.description:
+        return f"- {doc.name}: {doc.description} (file: {doc.location})"
+    return f"- {doc.name}: (file: {doc.location})"
 
 
 def _should_include_git_history_guard(
