@@ -78,7 +78,7 @@ class BrokenSkill:
     def __init__(self, name: str, reason: str, cause: BaseException | None = None):
         self.__name__ = name
         self.reason = reason
-        self.__doc__ = f"authored skill {name!r} is unusable: {reason}"
+        self.__doc__ = f"authored Python tool {name!r} is unusable: {reason}"
         self._cause = cause
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -126,15 +126,15 @@ def load_authored(
 ) -> dict[str, str | None]:
     """Bind every authored package (or just ``names``) into ``namespace``.
 
-    Returns ``{name: reason}`` with None for a usable skill. Names in ``reserved``
-    (installed or MCP-generated skills) are never rebound.
+    Returns ``{name: reason}`` with None for a usable tool. Names in ``reserved``
+    (installed Python tools or the generated ``search`` module) are never rebound.
     """
     outcome: dict[str, str | None] = {}
     found = {skill.name: skill for skill in list_authored_skills(skills_dir)}
     wanted = names or tuple(found)
     for name in wanted:
         if reserved and name in reserved:
-            outcome[name] = f"{name!r} is an installed or generated skill"
+            outcome[name] = f"{name!r} is an installed or generated Python tool"
         elif name not in found:
             outcome[name] = f"no package {name!r} under {skills_dir or '(unset)'}"
         else:

@@ -161,8 +161,8 @@ _GATE_QUESTIONS: dict[str, tuple[str, str, str]] = {
 HOME_KINDS = {
     "memory": "A memory: a durable fact, decision, failure, preference or outcome.",
     "prompt": "A prompt note: a narrow behavioural rule for how the assistant works.",
-    "skill": "A skill: a repeatable procedure exposed as an existing importable "
-    "Python module.",
+    "skill": "A skill: how to use an existing importable Python tool for a "
+    "repeatable procedure.",
     "subagent": "A subagent spec: a reusable delegation role for child agents.",
 }
 

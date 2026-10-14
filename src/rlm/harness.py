@@ -974,7 +974,7 @@ class HarnessView:
     def create_skill(
         self, title: str, content: str, *, reference: dict[str, Any], **kwargs: Any
     ) -> HarnessEntry:
-        """Describe how to call a module that is already importable in the kernel.
+        """Record a skill: how to use a Python tool already importable in the kernel.
 
         ``reference`` is required: ``{"type": "python", "import": "<module>",
         "callable": "run", "call_pattern": "await <module>(...)"}``. Pass
@@ -986,12 +986,12 @@ class HarnessView:
     def update_skill(
         self, id: str, title: str, content: str, **kwargs: Any
     ) -> HarnessEntry:
-        """Rewrite a skill description; ``reference``/``arguments`` are kept unless
+        """Rewrite a skill; ``reference``/``arguments`` are kept unless
         passed. See ``update``."""
         return self.update("skill", id, title, content, **kwargs)
 
     def delete_skill(self, id: str, **kwargs: Any) -> bool:
-        """Remove a skill description; see ``delete``."""
+        """Remove a skill; see ``delete``."""
         return self.delete("skill", id, **kwargs)
 
     def create_subagent(self, title: str, content: str, **kwargs: Any) -> HarnessEntry:
@@ -1075,11 +1075,11 @@ def harness(session_dir: str | Path | None = None) -> HarnessView:
 
 
 def load_skills(*names: str) -> dict[str, str | None]:
-    """Bring authored skill packages into this kernel now, without a restart.
+    """Bring authored skills' Python tools into this kernel now, without a restart.
 
     Reloads every package under the session's skills directory (or just ``names``)
     and rebinds each by name in the user namespace, exactly as kernel start does.
-    Returns ``{name: reason}`` where ``None`` means the skill is usable; a reason names
+    Returns ``{name: reason}`` where ``None`` means the tool is usable; a reason names
     the contract violation or import error, and the bound name raises it when called.
     """
     import sys

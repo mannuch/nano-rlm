@@ -481,7 +481,7 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
 
     output = tool_result(client)
     assert "{'greeter': None}" in output and "hi ann" in output
-    assert "'say': \"'say' is an installed or generated skill\"" in output
+    assert "'say': \"'say' is an installed or generated Python tool\"" in output
     assert "'nope': \"no package 'nope' under" in output
     output = tool_result(client, turn=1)
     assert "{'greeter': None}" in output and "bye ann" in output

@@ -38,14 +38,14 @@ from rlm.staircase import Block
 RefinementAction = Literal["create", "update", "delete"]
 
 REFINE_PROMPT = """Review this conversation and improve the continual harness: the persistent, editable
-set of prompt notes, memories, skill descriptions and subagent specs shown below. This is
+set of prompt notes, memories, skills and subagent specs shown below. This is
 similar to context compaction, but instead of summarizing you emit precise create, update
 or delete edits to reusable state.
 
 Components:
 - prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.
 - memory: durable facts, decisions, failures, preferences and outcomes.
-- skill: a description of an importable Python module that is already available in the
+- skill: how to use a Python tool, an importable module that is already available in the
   kernel. Skill create/update edits MUST include `reference` = {"type": "python",
   "import": "<module>", "callable": "run", "call_pattern": "await <module>(...)"} and an
   `arguments` object describing accepted inputs, required fields, defaults and constraints
@@ -63,7 +63,7 @@ Scope and persistence policy:
   bare id in edits. Ancestor entries are read-only context: never propose update or delete
   edits for them; create a local entry when an override is genuinely needed.
 - Use memory for declarative facts and preferences, skill for repeatable procedures exposed
-  as Python calls, prompt for narrow behavioural policy addendums, and subagent for reusable
+  as Python tools, prompt for narrow behavioural policy addendums, and subagent for reusable
   delegation roles. Create or update the smallest relevant component.
 - If a prior refinement caused problems, replace or delete the faulty entries.
 
