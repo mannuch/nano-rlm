@@ -491,11 +491,12 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
 
 def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
     view = build_view(tmp_path / "h")
-    assert "Authored skill packages" not in render_harness(view)
-    assert "Authored skill packages" not in render_harness(
+    assert "Authored skills persist" not in render_harness(view)
+    assert "Authored skills persist" not in render_harness(
         view, skills_dir="/s", has_ipython=False
     )
     block = render_harness(view, skills_dir="/s")
+    assert "Authored skills persist across sessions under /s" in block
     assert "/s/<name>/src/<name>/__init__.py" in block and "/s/<name>/SKILL.md" in block
 
 
