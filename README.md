@@ -4,11 +4,11 @@ A minimal CLI coding agent with a persistent IPython execution environment and o
 
 By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, and Bash commands and background jobs via `rlm.shell.run`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
-For convenience, rlm ships built-in _skills_ that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
+For convenience, rlm ships built-in Python tools that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled tools are pre-imported into the IPython kernel (see [Tools](#tools)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`). [Skills](#skills) are `SKILL.md` instructions that teach the agent workflows using these tools.
 
 Context compaction is on by default: the engine compacts when 16k tokens remain below an advertised model context window. Termination comes from the default tree-wide budget of 1M new tokens (`max_total_tokens`). The policy can set an explicit `summarize_at_tokens` threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
 
-Inside IPython, the `rlm` package is available in the namespace. When recursion is allowed, `await rlm.agent.spawn(task=...)` returns a handle to a supervisor-owned agent that continues across cells. Skills supplied by the host environment (see [Skills](#skills)) are importable directly by name, e.g. `import websearch`.
+Inside IPython, the `rlm` package is available in the namespace. When recursion is allowed, `await rlm.agent.spawn(task=...)` returns a handle to a supervisor-owned agent that continues across cells. Python tool packages supplied by the host environment (see [Tools](#tools)) are importable directly by name, e.g. `import websearch`.
 
 ## Install
 
@@ -30,9 +30,9 @@ rlm --acp
 There is no standalone prompt mode: every session is created by an ACP client that
 supplies the full runtime configuration (see below). The only other commands are
 operator utilities for a harness store that never run inside a session, such as
-`rlm harness prune` (see [Episodes](#episodes)). Skill CLIs provided by the host
+`rlm harness prune` (see [Episodes](#episodes)). Tool CLIs provided by the host
 environment are on `$PATH` inside the kernel (e.g. `websearch --queries "..."` when
-the `websearch` skill is installed).
+the `websearch` tool package is installed).
 
 ## Agent Client Protocol
 
@@ -63,7 +63,7 @@ RLM's ACP surface is a versioned training contract. `initialize` advertises the 
 `ai.prime.rlm/contract-v1` marker in its response `_meta`; clients must require
 it, then provide one complete `ai.prime.rlm/runtime-v1` object in
 `session/new._meta`. The runtime object contains the ACP session ID, model,
-provider, execution policy, prompt configuration, enabled built-in skills,
+provider, execution policy, prompt configuration, enabled built-in Python tools,
 optional builtin tool selection,
 explicit kernel environment, and optional search credential. Nullable and
 disabled values are sent explicitly as `null` or empty collections. Missing,
@@ -97,7 +97,7 @@ not understand the extension ignore it.
 ## Configuration
 
 All runtime configuration enters through the `ai.prime.rlm/runtime-v1` contract object
-(model, provider credentials, execution policy, prompt configuration, skills, builtin tools, kernel
+(model, provider credentials, execution policy, prompt configuration, Python tools in `skills`, builtin tools, kernel
 environment, search credential, and an optional `harness` object; see [Continual harness](#continual-harness)). Prompt configuration is role-aware: optional
 `subagent_append_to_system_prompt` (nodes that can still recurse) and
 `leaf_append_to_system_prompt` (depth == max_depth) override `append_to_system_prompt`
@@ -145,9 +145,9 @@ and context retention policy are unchanged.
 
 The process environment configures only process infrastructure:
 
-| Variable   | Default  | Description                          |
-| ---------- | -------- | ------------------------------------ |
-| `RLM_HOME` | `~/.rlm` | Root directory for sessions and data |
+| Variable   | Default  | Description                                                        |
+| ---------- | -------- | ------------------------------------------------------------------ |
+| `RLM_HOME` | `~/.rlm` | Root directory for sessions, data, and skills (`$RLM_HOME/skills`) |
 
 ## Recursion
 
@@ -472,7 +472,7 @@ h.update_memory("project_venv", "Project venv", "...", global_=True)   # needs g
 `update_*`/`delete_*` take the bare id or a `local:`/`global:` prefix; ancestor entries raise
 `PermissionError`. Every method carries a docstring, so `help(h)` (or `help(h.create_skill)`) is
 the full reference; the system prompt only lists the essential calls. A `skill` entry describes an already-importable module; it is not a
-package (see [Skills](#skills) for the on-disk skill contract). Stores are rewritten
+package (see [Python tool package contract](#python-tool-package-contract) for the on-disk package contract). Stores are rewritten
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
 store outside a running session.
@@ -540,7 +540,7 @@ entry in their system prompt with the package already pre-imported.
 ### Authored skill packages
 
 `skills_dir` gives agent-written packages a place that survives the session. An authored
-package is an installed skill minus installation — the [skill contract](#skill-contract)
+package is an installed skill minus installation — the [package contract](#python-tool-package-contract)
 applies with these adjustments:
 
 - Required: `<skills_dir>/<name>/SKILL.md` and `<skills_dir>/<name>/src/<name>/__init__.py`
@@ -555,7 +555,7 @@ At kernel start every authored package's `src/` goes on `sys.path` and the modul
 pre-imported by name with the same `await <name>(...)` wrapper as an installed skill. A
 package that breaks the contract or fails to import binds a placeholder whose call raises
 the reason, so a bad package never breaks the kernel. Names must not collide with installed
-or MCP-generated skills. A package written or edited during the session is brought in
+Python tools or the supervisor's generated `search` module. A package written or edited during the session is brought in
 without a restart by `rlm.harness.load_skills("<name>")` (no names = all), which
 reloads and rebinds it exactly as kernel start does and returns `{name: reason}` with
 `None` for a usable skill. The system prompt states the contract and this workflow;
@@ -725,11 +725,15 @@ inspectable and reversible by hand, while no in-session path can recreate an epi
 across RL rollouts of one task would let a rollout read another's outcome. A store that
 holds episodes cannot be read by builds that predate the kind.
 
-## Skills
+## Tools
 
-`rlm` ships a small set of built-in skills enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools](#mcp-tools) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
+Tools are executable capabilities. They can be native model tool calls, Python callables in IPython, or shell commands. Skills are `SKILL.md` workflows that guide the agent's use of tools.
 
-From IPython, import a skill and call its async `run(...)` entrypoint:
+`rlm` ships a small set of built-in Python tools enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools](#mcp-tools) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). The contract's `skills` field selects Python tools; it does not select `SKILL.md` workflows.
+
+Additional Python tool packages are supplied by the host environment: before `install.sh` runs, the environment places packages under `$RLM_HOME/skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`. The prompt advertises pre-imported callables as "Python tools (pre-imported)" and packages with console commands as "Shell-enabled Python tools".
+
+From IPython, call a pre-imported tool's async `run(...)` entrypoint through its callable module:
 
 ```python
 import websearch
@@ -738,19 +742,19 @@ help(websearch)  # signature + docstring
 results = await websearch(queries=["latest jupyter_client release"])
 ```
 
-Uploaded `rlm-skill-*` packages also expose their declared console command. Session-generated built-in and MCP proxy skills are IPython-only:
+Installed `rlm-skill-*` tool packages also expose their declared console command. Built-in Python tools and MCP proxy callables are IPython-only:
 
 ```bash
 websearch --queries "latest jupyter_client release"
 ```
 
-### Skill contract
+### Python tool package contract
 
-A skill is a normal Python package laid out like this:
+A Python tool package is laid out like this:
 
 ```text
 <name>/
-├── SKILL.md
+├── SKILL.md            # Optional workflow instructions
 ├── pyproject.toml
 └── src/
     └── <name>/
@@ -773,20 +777,26 @@ The `pyproject.toml` points its console script at the shared CLI entry:
 
 Naming expectations (all match):
 
-- skill directory name: `<name>`
+- package directory name: `<name>`
 - distribution name in `pyproject.toml`: `rlm-skill-<name>`
 - import name: `<name>`
 - console script name: `<name>`
 
 Keyword arguments on `run(...)` and CLI flags line up automatically — `queries: list[str]` becomes `--queries` on the CLI.
 
-Dependencies go in the skill's own `pyproject.toml`; declare `rlm` there so the shared CLI entry resolves. Version conflicts between skills installed side-by-side are the user's responsibility.
+The distribution prefix `rlm-skill-` and CLI entrypoint `rlm.skill:cli` identify Python tool packages. Neither requires a `SKILL.md` file. Dependencies go in the package's own `pyproject.toml`; declare `rlm` there so the shared CLI entry resolves. Version conflicts between packages installed side-by-side are the user's responsibility.
 
 ### Local development
 
-For running `rlm` against a specific skill set outside of a sandbox-orchestrated environment, create a `/task/rlm-skills/` directory (or bind-mount one) and place skill packages there before running `install.sh`. The rlm repo ships no skills by default; look at the `rlm-swe` or `rlm-deepdive` environments for working skill packages to copy.
+Place Python tool packages under `$RLM_HOME/skills/` (`~/.rlm/skills/` by default) before running `install.sh`. [The `say` fixture](tests/fixtures/skills/say) is a minimal package example.
 
-### MCP tools
+## Skills
+
+A skill is a folder holding a `SKILL.md` with `name` and `description` frontmatter. It contains instructions for a workflow and may include scripts, references, or a Python tool package. A skill's Markdown is read by the agent; its scripts and tools are executed through the available runtime tools.
+
+Every folder under `$RLM_HOME/skills` holding a `SKILL.md` is listed in a `## Skills` prompt section, one `- name: description (file: path)` line each (the codex convention). Only metadata and paths are included; the agent reads the full `SKILL.md` when its task matches. This discovery is independent of installed Python tool packages. A folder with both a `SKILL.md` and a tool package contributes workflow instructions to the skills catalog and a callable to the Python tools listing.
+
+## MCP tools
 
 A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) tool servers to `rlm` through the ACP session (a standard `mcpServers` config shape). Streamable HTTP and stdio transports are supported:
 
@@ -840,7 +850,7 @@ Each call connects using the configured transport, invokes the tool, and returns
 
 ## Kernel
 
-The IPython kernel always runs in rlm's own Python (`sys.executable`). `install.sh` puts `rlm` and all discovered skills into the same `uv tool install` environment, so `from rlm import run`, `import edit`, etc. work natively from inside an IPython cell.
+The IPython kernel always runs in rlm's own Python (`sys.executable`). `install.sh` puts `rlm` and all discovered Python tool packages into the same `uv tool install` environment, so their imports work natively from inside an IPython cell. Enabled built-in tools are also pre-imported by name, e.g. `edit`.
 
 The kernel inherits the supervisor's environment minus variables that would redirect its interpreter or config (`PYTHONHOME`, `UV_PYTHON`, `CONDA_PREFIX`, `PIP_TARGET`, …), provider and infrastructure prefixes (`OPENAI_`, `PRIME_`, `RLM_`, `AWS_`, `GITHUB_`, …) and anything that looks like a credential by name or by a `user:pass@` URL, plus the contract's explicit `kernel_env` mapping. Platform variables (`PATH`, home/user/shell, locale, temporary-directory, certificate, and `VIRTUAL_ENV`) always pass. It receives private Jupyter/IPython config directories. This de-ambients credentials as far as those patterns reach; it is not hostile-code containment because the kernel still shares the sandbox user, filesystem, process namespace, and network with the supervisor.
 

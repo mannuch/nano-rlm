@@ -84,6 +84,7 @@ from rlm.tools import (
     IPythonREPL,
     ToolContext,
     ToolOutcome,
+    discover_skill_docs,
     discover_skills,
     get_active_builtin_tools,
     get_builtin_tool,
@@ -196,7 +197,7 @@ QUOTE_NESTING_HINT = (
     "That SyntaxError comes from program text nested inside a Python string literal. Pick a "
     'delimiter the text does not contain: r"""...""" for source with \'\'\' or backslashes, '
     "r'''...''' for source with \"\"\", or \"\\n\".join([...]) for both; for existing files use "
-    "the edit skill with short old_str/new_str hunks."
+    "the edit tool with short old_str/new_str hunks."
 )
 MULTILINE_COMMAND_HINT = (
     "That SyntaxError comes from a multi-line command inside a plain-quoted Python string. "
@@ -2311,7 +2312,6 @@ class RLMEngine:
     ) -> str:
         return build_system_prompt(
             self.cwd,
-            str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir, self._skills_dir),
             depth=self.depth,
             session_dir=str(self.session.dir),
@@ -2320,6 +2320,7 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            skill_docs=discover_skill_docs(SKILLS_DIR) if SKILLS_DIR else [],
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,
