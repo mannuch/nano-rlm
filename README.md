@@ -575,8 +575,7 @@ installed Python tool rather than an authored one: it is pre-imported from the v
 folder with no `src/`, `pyproject.toml` or `__init__.py` is an instruction-only skill and is
 never loaded as a package.
 
-`author_skills` is off by default, and no authored packages load. Leave it off when RL
-rollouts share an `RLM_HOME`: one rollout's skills would reach the next.
+`author_skills` is off by default, and no authored packages load.
 
 ### Refinement
 

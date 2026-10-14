@@ -106,9 +106,7 @@ class HarnessConfig(_ConfigModel):
     ``auto_refine`` unless ``auto_refine_review`` is ``planner``."""
     author_skills: bool = False
     """Let the agent write skills that ship a Python tool under the skills root,
-    ``$RLM_HOME/skills``, whose packages go on the kernel's sys.path at start. Off by
-    default: a root shared across RL rollouts would carry one rollout's skills into
-    another."""
+    ``$RLM_HOME/skills``, whose packages go on the kernel's sys.path at start."""
     record_episodes: bool = False
     """Write one ``episode`` entry per root session into the global store at close:
     the task, the coarsest compaction blocks, the outcome and the session directory.
