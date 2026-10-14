@@ -521,8 +521,8 @@ Python tool, and a harness `skill` entry is a skill kept as harness state:
 | Refinement can  | Never touch it                             | Never touch it                                                | Create, update, delete, roll back                                                                                       |
 
 The relationship is pointer to target. An entry's `reference.import` names a module that
-must already be importable (an installed Python tool, an authored skill's tool, the
-generated `search` module, or `rlm` itself); apply-time validation rejects an entry that points anywhere else. The
+must already be importable (an installed Python tool, an authored skill's tool, a
+built-in Python tool from the contract's `skills` list, or `rlm` itself); apply-time validation rejects an entry that points anywhere else. The
 entry adds what code cannot carry: when this call is the right move, which arguments
 matter for a kind of task, gotchas learned from use. One package can be described by
 several entries, and a package with no entry is still callable, just not surfaced as a
@@ -558,7 +558,7 @@ At kernel start every authored package's `src/` goes on `sys.path` and the modul
 pre-imported by name with the same `await <name>(...)` wrapper as an installed Python tool. A
 package that breaks the contract or fails to import binds a placeholder whose call raises
 the reason, so a bad package never breaks the kernel. Names must not collide with installed
-Python tools or the supervisor's generated `search` module. A package written or edited during the session is brought in
+Python tools or the built-in Python tools the session generates from the contract's `skills` list. A package written or edited during the session is brought in
 without a restart by `rlm.harness.load_skills("<name>")` (no names = all), which
 reloads and rebinds it exactly as kernel start does and returns `{name: reason}` with
 `None` for a usable tool. The system prompt states the contract and this workflow;

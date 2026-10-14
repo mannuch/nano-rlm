@@ -127,7 +127,8 @@ def load_authored(
     """Bind every authored package (or just ``names``) into ``namespace``.
 
     Returns ``{name: reason}`` with None for a usable tool. Names in ``reserved``
-    (installed Python tools or the generated ``search`` module) are never rebound.
+    (installed Python tools or the session's generated built-in tool modules) are never
+    rebound.
     """
     outcome: dict[str, str | None] = {}
     found = {skill.name: skill for skill in list_authored_skills(skills_dir)}
