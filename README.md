@@ -85,7 +85,10 @@ configuration.
 Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
 RLM publishes sparse, labeled relationships between those request IDs under
 `ai.prime.acp/semantic-edges-v1`: `continuation`, `subagent_call`,
-`subagent_return`, `compaction`, `refinement_attempt`, and `refinement`. `continuation` preserves same-agent causal
+`subagent_return`, `compaction`, `refinement_attempt`, and `refinement`, plus `peer_spawn`,
+`peer_promote`, and `peer_cancel` when the mesh is enabled (see [Mesh of trees](#mesh-of-trees)).
+A mesh session has several parentless sessions (the root and every peer), and `agent_message`
+edges can cross between their trees. `continuation` preserves same-agent causal
 order even when a consumer's physical token-prefix graph splits. ACP consumers
 can resolve the request IDs onto their own message nodes while harnesses that do
 not understand the extension ignore it.
@@ -125,7 +128,7 @@ agent identity metadata.
 `prompt_overrides` replaces named runtime texts for every engine in the tree. The names
 are the keys of `rlm.prompt.DEFAULT_PROMPTS`: the system prompt's `task` line and the
 `repl_doctrine` and `delegation_doctrine` paragraphs; the reference sections they sit in
-(`runtime_reference`, `delegation_reference`, `history`, `harness_api`); the compaction
+(`runtime_reference`, `delegation_reference`, `peer_reference`, `history`, `harness_api`); the compaction
 texts `checkpoint`, `rollup` and `staircase_framing`; and the refinement planning text
 `refine`. Unknown names and empty texts are rejected, as is a text that drops a marker
 the runtime fills in (`<repl_doctrine>` inside `runtime_reference`, `%(scope_policy)s`
@@ -208,6 +211,52 @@ ACP dependency edges use `agent_message` for delivered instructions and explicit
 The native `wait` tool suspends inference without occupying an IPython cell, until a new inbox arrival, parent instruction, or timeout (default 300 seconds, range 0–300). It also yields to queued instructions. Already-announced unread events do not repeatedly wake it. A final root answer returns control to the ACP caller; use `wait` to keep the current prompt available for events.
 
 The supervisor owns inboxes and instruction queues. Each agent's `inbox.jsonl` records arrivals, instruction delivery, and explicit reads; delivered messages and notifications also enter `messages.jsonl`. Message payloads are limited to 65,536 JSON-encoded UTF-8 bytes. Reports are rejected once an inbox contains 10,000 events, and pending instruction queues have the same limit; lifecycle events remain recordable. This state lasts while the supervisor lives. Restarting a crashed IPython kernel and restoring a crashed supervisor are separate features.
+
+## Mesh of trees
+
+With `policy.max_peers > 0` a session becomes a mesh of trees: besides the root, agents can
+start *peers*, persistent roots of their own trees that any agent can talk to directly. The
+default of 0 disables everything in this section.
+
+```python
+p = await rlm.peer.spawn("Own the frontend; answer UI questions", name="frontend-specialist")
+await rlm.peer.list()                  # the root and every peer; all=True adds every agent
+p = await rlm.peer.get("frontend-specialist")   # a peer by name ("root" for the root), any agent by id
+mid = await p.send("Where is the login form rendered?")       # wakes p if idle
+await p.send("FYI: auth moved to /v2", wake=False)             # seen at p's next turn
+await other.send("src/ui/Login.tsx", in_reply_to=question_id)  # replies are explicit messages
+await (await rlm.agent.get("specialist")).promote(name="frontend-specialist")
+(rlm.scratchpad / "board.md").write_text("- [ ] auth review\n")
+```
+
+A peer runs at depth 0 with the full `max_depth` for its own subtree, is always persistent,
+and has a required, session-unique name. The agent that spawns it becomes its *owner*: each
+of the peer's answers reaches the owner as a `peer.completed` inbox event (status `idle`), and
+a final one reports cancellation or failure. A peer outlives its owner; only the owner or the
+root can cancel it, and closing the ACP session tears down every peer and its subtree.
+Promoting a direct child (`AgentHandle.promote(name)`) turns it into a peer you own: it
+becomes persistent, keeps its subtree, session directory and kernel, and at its next turn
+boundary resets to depth 0 with a rebuilt system prompt.
+
+Talking is open and control is not. Any agent at any depth can `send` to, `info`, `history`
+or `result` any agent in the session; cancel and steer still follow ownership and parentage.
+`peer.message` events carry `from_id`, `from_name`, `text`, and `in_reply_to`, and wake an
+idle receiver unless sent with `wake=False`. Every wake costs the receiver a model turn, so
+broadcasts are a loop over `rlm.peer.list()` with `wake=False`. There is no request/response
+RPC: replies are ordinary messages sent with `in_reply_to`, and agents wait for them with the
+native `wait` tool, so two agents waiting on each other cannot deadlock.
+
+`rlm.scratchpad` (also `$RLM_SCRATCHPAD` in the kernel and in shell jobs) is an empty
+directory under the root session directory that every agent shares, for task boards, notes,
+and artifacts that should not land in the repository. Nothing is locked or structured;
+`rlm.watch.path` on it turns changes into inbox events.
+
+Peers live in the root's supervisor, so every budget (tokens, turns, spawns, inference
+concurrency) is shared by the whole session, and the worst-case number of live IPython
+kernels is `1 + max_peers + max_subagent_calls`. The `session/close` snapshot adds
+`peers_spawned`, `peers_promoted`, `peer_messages`, `peer_messages_nowake`,
+`max_live_kernels`, `kernel_alive_seconds`, and `kernel_busy_seconds` to its `supervisor`
+block, and `max_peers` to `limits`.
 
 ## Compaction
 
@@ -399,6 +448,24 @@ Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directorie
 │   ├── messages.jsonl
 │   └── sub-f6g7/
 └── sub-h8i9/
+```
+
+With the mesh enabled, peers sit flat under the root session directory as `peer-*`,
+whoever spawned them, beside a `mesh.jsonl` index of every peer and the shared
+`scratchpad/`. A promoted child keeps its original `sub-*` directory, so `mesh.jsonl`, not
+the directory layout, is the list of peers; each agent's `meta.json` records its `kind`,
+`owner_id`, and current `depth`.
+
+```text
+.rlm/sessions/abc123/            # the root (tree A)
+├── mesh.jsonl                   # {"type": "peer" | "promoted", "id", "name", "dir", "owner_id"}
+├── scratchpad/                  # shared by every agent
+├── sub-d4e5/                    # the root's child
+├── sub-91ab/                    # a promoted peer: depth 0 now, directory unchanged
+│   └── sub-c3d4/
+├── peer-b2c3/                   # a peer the root spawned (tree B)
+│   └── sub-7a1f/
+└── peer-e9f0/                   # a peer that peer-b2c3 spawned: flat, not nested
 ```
 
 These artifacts are consumable for debugging, visualization, or training-data extraction.

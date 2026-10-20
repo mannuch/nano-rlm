@@ -43,7 +43,7 @@ from rlm.compaction import (
     prompt_pointer_note,
     truncate_tool_output,
 )
-from rlm.config import RuntimeConfig
+from rlm.config import InvocationContext, RuntimeConfig
 from rlm.harness import (
     ANCESTOR_DIRS_ENV,
     EPISODE_CONTENT_CHARS,
@@ -368,7 +368,10 @@ class RLMEngine:
         judge = config.harness.refine_judge
         self._refine_judge = (
             RefineJudge(judge)
-            if judge is not None and config.harness.enabled and self.depth == 0
+            if judge is not None
+            and config.harness.enabled
+            and self.depth == 0
+            and self._is_session_root()
             else None
         )
 
@@ -392,6 +395,8 @@ class RLMEngine:
         # the prompt is rebuilt.
         self._known_skills: frozenset[str] = frozenset()
         self._new_skill_lines: list[str] = []
+        # Whether a promotion to peer root has rebuilt this agent's system prompt.
+        self._promoted = False
 
         # Where the current branch (the context since the last compaction) begins:
         # its first turn, ledger message index, and context window. A compaction
@@ -577,6 +582,7 @@ class RLMEngine:
         staircase_before = self._staircase.snapshot()
         pinned_before = self._pinned_prompt
         skills_before = (self._known_skills, list(self._new_skill_lines))
+        promoted_before = self._promoted
         compacted_before = self._compacted
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
@@ -591,6 +597,11 @@ class RLMEngine:
         provenance = None
         if message_type == "supervisor_notification":
             message, provenance = runtime_event("notice", prompt)
+        elif message_type == "peer_task":
+            owner_id = self._supervisor.agent_context(self._invocation_id)["owner_id"]
+            message, provenance = agent_input(
+                prompt, agent=owner_id, kind="task", sender="owner"
+            )
         elif message_type == "parent_message" or self.depth > 0:
             parent_id = self._supervisor.agent_context(self._invocation_id)["parent_id"]
             message, provenance = agent_input(
@@ -674,6 +685,11 @@ class RLMEngine:
                 self._staircase.restore(staircase_before)
                 self._pinned_prompt = pinned_before
                 self._known_skills, self._new_skill_lines = skills_before
+                if self._promoted and not promoted_before:
+                    # The rollback restored the pre-promotion system prompt: rebuild it
+                    # again at the next attempt's first boundary.
+                    self._promoted = False
+                    self._supervisor.rearm_promotion(self._invocation_id)
                 self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
                 self._turn = turn_before
                 self._metrics.stop_reason = (
@@ -778,7 +794,10 @@ class RLMEngine:
         self._repl = IPythonREPL(
             cwd=self.cwd,
             session=self.session,
-            kernel_env=self.kernel_env,
+            kernel_env={
+                **self.kernel_env,
+                **(self._supervisor.scratchpad_env() if self._supervisor else {}),
+            },
             depth=self.depth,
             max_depth=self.max_depth,
             broker_endpoint=broker_endpoint,
@@ -800,6 +819,8 @@ class RLMEngine:
                     cancelled = True
             if cancelled:
                 raise asyncio.CancelledError
+            if self._supervisor is not None:
+                self._supervisor.kernel_started(self._invocation_id)
 
             self._install_system_prompt(prompt)
             self._last_good = len(self.session.messages)
@@ -809,6 +830,8 @@ class RLMEngine:
         except BaseException:
             self._repl.shutdown()
             self._repl = None
+            if self._supervisor is not None:
+                self._supervisor.kernel_stopped(self._invocation_id)
             if self._owns_supervisor and self._supervisor is not None:
                 await self._supervisor.aclose()
                 self._supervisor = None
@@ -971,6 +994,7 @@ class RLMEngine:
             self._apply_steering()
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
+            self._apply_promotion()
             await self._refine_at_boundary()
             self._announce_new_skills()
             messages = self.session.messages
@@ -1184,6 +1208,8 @@ class RLMEngine:
                                         exc_info=True,
                                     )
             duration = time.time() - t0
+            if tool_name == "ipython" and self._supervisor is not None:
+                self._supervisor.record_cell(duration)
             for event in tool_result.metric_events:
                 self._metrics.record(event)
 
@@ -1281,6 +1307,8 @@ class RLMEngine:
             if self._repl is not None:
                 self._repl.shutdown()
                 self._repl = None
+                if self._supervisor is not None:
+                    self._supervisor.kernel_stopped(self._invocation_id)
         finally:
             if self.session is not None:
                 self._record_episode()
@@ -1318,6 +1346,7 @@ class RLMEngine:
         harness = self._harness
         if (
             self.depth != 0
+            or not self._is_session_root()
             or not self.harness_config.record_episodes
             or harness is None
             or harness.global_ is None
@@ -1924,11 +1953,17 @@ class RLMEngine:
                 "active_subagent_calls": self._supervisor.active_calls
                 if self._supervisor is not None
                 else 0,
+                **(
+                    self._supervisor.mesh_stats()
+                    if self._supervisor is not None
+                    else {}
+                ),
             },
             "limits": {
                 "max_depth": self.runtime_config.policy.max_depth,
                 "max_concurrent_subagents": self.runtime_config.policy.max_concurrent_subagents,
                 "max_subagent_calls": self.runtime_config.policy.max_subagent_calls,
+                "max_peers": self.runtime_config.policy.max_peers,
                 "max_tokens": self.runtime_config.policy.max_tokens,
                 "compaction": self.compaction,
                 "summarize_at_tokens": self.summarize_at_tokens,
@@ -1971,7 +2006,12 @@ class RLMEngine:
 
     async def _maybe_auto_refine(self) -> None:
         config = self.harness_config
-        if not config.auto_refine or self.depth != 0 or self._harness is None:
+        if (
+            not config.auto_refine
+            or self.depth != 0
+            or not self._is_session_root()
+            or self._harness is None
+        ):
             return
         if (
             config.max_refinements is not None
@@ -2316,7 +2356,43 @@ class RLMEngine:
             )
         )
 
-    def _install_system_prompt(self, task_text: str) -> int | None:
+    def _is_session_root(self) -> bool:
+        """The agent driven by the ACP client. Peers are depth-0 roots of their own trees
+        but leave session-level features (refinement, episodes) to it."""
+        return (
+            self._supervisor is None or self._invocation_id == self._supervisor.root_id
+        )
+
+    def _apply_promotion(self) -> None:
+        """Become a peer root after a parent's rlm.agent promote(): depth 0 with the full
+        recursion budget, a system prompt rebuilt for that role, and a notice."""
+        if self._supervisor is None:
+            return
+        promotion = self._supervisor.take_promotion(self._invocation_id)
+        if promotion is None:
+            return
+        self.runtime_config = self.runtime_config.model_copy(
+            update={"invocation": InvocationContext()}
+        )
+        self.depth = 0
+        self._promoted = True
+        self._install_system_prompt(self._task_text, reason="promotion")
+        text = (
+            f"You are now the peer `{promotion['name']}`, a root of your own tree owned by "
+            f"agent {promotion['owner_id']}. You outlive your former parent, keep your "
+            "children and kernel, and can delegate to the full depth. Your answers no "
+            "longer go to a parent; your owner receives peer.completed events, and other "
+            "agents reach you through rlm.peer."
+        )
+        message, provenance = runtime_event("promotion", text)
+        self.session.log(
+            {"type": "promotion_notice", "message": message, "provenance": provenance},
+            in_context=True,
+        )
+
+    def _install_system_prompt(
+        self, task_text: str, *, reason: str = "harness"
+    ) -> int | None:
         """Build the system prompt and make it the context's first message.
 
         The first call seeds the context; later calls (the harness changed) replace the
@@ -2332,7 +2408,7 @@ class RLMEngine:
             index = self.session.log({"type": "system", "message": system_message})
             indices = [index, *self.session.context_indices[1:]]
             return self.session.replace_context(
-                [system_message, *messages[1:]], reason="harness", indices=indices
+                [system_message, *messages[1:]], reason=reason, indices=indices
             )
         self.session.log({"type": "system", "message": system_message}, in_context=True)
         return None

@@ -114,12 +114,20 @@ class _ProgrammaticToolCallSnapshot(_ContractModel):
 class _SupervisorSnapshot(_ContractModel):
     subagent_calls: int = Field(ge=0)
     active_subagent_calls: int = Field(ge=0)
+    peers_spawned: int = Field(default=0, ge=0)
+    peers_promoted: int = Field(default=0, ge=0)
+    peer_messages: int = Field(default=0, ge=0)
+    peer_messages_nowake: int = Field(default=0, ge=0)
+    max_live_kernels: int = Field(default=0, ge=0)
+    kernel_alive_seconds: float = Field(default=0, ge=0)
+    kernel_busy_seconds: float = Field(default=0, ge=0)
 
 
 class _LimitsSnapshot(_ContractModel):
     max_depth: int = Field(ge=0)
     max_concurrent_subagents: int = Field(gt=0)
     max_subagent_calls: int | None = Field(default=None, gt=0)
+    max_peers: int = Field(default=0, ge=0)
     max_tokens: int | None = Field(default=None, gt=0)
     compaction: bool
     summarize_at_tokens: int | None = Field(default=None, gt=0)
