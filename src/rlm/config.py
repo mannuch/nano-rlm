@@ -184,6 +184,10 @@ class ExecutionPolicy(_ConfigModel):
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
+    max_peers: int = Field(default=0, ge=0)
+    """Session-total cap on peer roots (spawned or promoted). 0 (default) disables the
+    mesh: no rlm.peer operations and no shared scratchpad. Peers share the session's
+    budgets, so the worst-case live kernel count is 1 + max_peers + max_subagent_calls."""
     allow_git: bool = False
 
 

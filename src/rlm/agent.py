@@ -28,6 +28,9 @@ class AgentInfo:
     error: str | None
     turns: int = 0
     cleanup_error: str | None = None
+    kind: Literal["root", "child", "peer"] = "child"
+    owner_id: str | None = None
+    depth: int = 0
 
     @classmethod
     def from_payload(cls, payload: dict) -> AgentInfo:
@@ -93,6 +96,14 @@ class AgentHandle:
         """
         return await broker.agent_request(
             "agent.steer", agent_id=self.id, message=message
+        )
+
+    async def promote(self, name: str) -> AgentInfo:
+        """Turn this child into a peer root named ``name`` (mesh-unique). It becomes
+        persistent, outlives you, keeps its subtree, and resets to depth 0 at its next
+        turn boundary; you become its owner. Requires the mesh (policy.max_peers)."""
+        return AgentInfo.from_payload(
+            await broker.agent_request("agent.promote", agent_id=self.id, name=name)
         )
 
 

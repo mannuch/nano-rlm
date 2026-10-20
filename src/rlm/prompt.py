@@ -390,6 +390,42 @@ history, then `await child.steer("report what you have and stop")` if it should 
 subscription itself does not direct the child.
 """
 
+PEER_PROMPT = """## Peers and the mesh
+This session is a mesh of trees: besides the root, peers are roots of their own trees, each
+with the full recursion depth and its own children. Every agent, at any depth, can talk to any
+other; only control (cancel, steer) follows ownership and parentage.
+
+Spawn a peer for long-lived, independent work that others will consult, such as owning an
+area of the codebase; spawn a child for a scoped subtask whose answer comes back to you.
+`p = await rlm.peer.spawn(task, name="frontend-specialist")` returns a PeerHandle (.id, .name,
+.session_dir). Names are mesh-unique and should say what the peer is for, so others can find
+it. You become its owner: each of its answers arrives as a `peer.completed` inbox event
+(["peer_id"], ["name"], ["status"], ["answer"] tail, ["turns"], ["error"]), and only you or
+the root can `await p.cancel()` it. Peers are persistent: after answering they go idle with
+their kernel and conversation, and a message wakes them.
+
+Discover agents with `await rlm.peer.list()` (the root and every peer: .id, .name, .kind,
+.owner_id, .task, .status, .depth) or `list(all=True)` (every agent in the session). Get a
+handle with `await rlm.peer.get(name_or_id)`; the root is `"root"`.
+`mid = await p.send(text)` puts a `peer.message` in its inbox (["from_id"], ["from_name"],
+["text"], ["in_reply_to"]) and returns the message id. Reply to a question with
+`await (await rlm.peer.get(event["content"]["from_id"])).send(answer, in_reply_to=event["id"])`;
+replies are never sent for you. A message wakes an idle receiver, which costs it a model turn:
+pass `wake=False` for FYIs and broadcasts (a loop over `rlm.peer.list()`), which it sees at its
+next turn. After asking, use the native wait tool rather than a long in-cell wait.
+`await p.history()` reads its conversation; `await p.result()` returns its latest answer.
+To make a specialist child discoverable, `await child.promote(name=...)` turns a direct child
+into a peer you own: it outlives you, keeps its subtree and restarts at depth 0.
+
+`rlm.scratchpad` (also `$RLM_SCRATCHPAD`) is a directory shared by every agent and empty at
+the start: use it for shared state, task boards, notes and artifacts, never the repository.
+Nothing is locked: prefer one file per agent, append-only logs, or write-then-rename. Pair a
+scratchpad change with a message (even `wake=False`) or watch it with
+`await rlm.watch.path(str(rlm.scratchpad / "board.md"))`.
+
+Budgets (tokens, turns, spawns, peers) are shared by the whole session, not per tree.
+"""
+
 DELEGATION_PROMPT = """## Delegating work
 When a task has independent parts that benefit from separate investigation, delegate them to subagents while you work on another part. Give each child a bounded, self-contained brief, relevant context, and a clear expected result. Avoid duplicating the same investigation yourself unless independent verification is useful.
 Use persistent=False for a one-shot assignment and persistent=True when you expect follow-ups on the same context.
@@ -475,6 +511,7 @@ DEFAULT_PROMPTS: dict[str, str] = {
     "delegation_doctrine": DELEGATION_DOCTRINE_PROMPT,
     "runtime_reference": RUNTIME_PROMPT,
     "delegation_reference": AGENT_PROMPT,
+    "peer_reference": PEER_PROMPT,
     "history": HISTORY_PROMPT,
     "harness_api": HARNESS_API_PROMPT,
     "checkpoint": CHECKPOINT_PROMPT,
@@ -595,7 +632,12 @@ def build_system_prompt(
                 }
             )
         )
-    if depth > 0:
+    mesh = bool(agent_info and agent_info.get("mesh"))
+    if agent_info and agent_info.get("kind") == "peer":
+        parts.append(
+            f"You are the peer `{agent_info['name']}`, a root of your own tree in this session's mesh, owned by agent {agent_info['owner_id']}. Work on the task your owner gave you and the questions other agents send you. After answering, you become idle and retain your kernel; a message or other inbox event wakes you, and your owner receives each answer as a `peer.completed` event."
+        )
+    elif depth > 0:
         parts.append(
             "You are a sub-agent. Work on the task delegated by your immediate parent; do not widen its scope. Return a self-contained answer with relevant evidence, sources, paths, and uncertainties."
         )
@@ -648,13 +690,19 @@ def build_system_prompt(
                 "Delegation is disabled at this depth. Work directly with your available tools."
             )
         if depth > 0:
-            parts.append(
-                "Your final answer is your deliverable: it reaches your parent automatically as an `agent.completed` event and through `result()`. You finish by replying without calling any tool; that reply is your final answer, so put the complete report there. Do not send the final report with `await rlm.agent.send_to_parent(message)`; use it only for interim findings, blockers or questions while you are still working. It returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
-            )
+            deliverable = "Your final answer is your deliverable: it reaches your parent automatically as an `agent.completed` event and through `result()`. You finish by replying without calling any tool; that reply is your final answer, so put the complete report there. Do not send the final report with `await rlm.agent.send_to_parent(message)`; use it only for interim findings, blockers or questions while you are still working. It returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
+            if mesh:
+                deliverable = deliverable.replace(
+                    "You cannot steer your parent or message siblings.",
+                    "You cannot steer your parent; reach siblings and other agents through rlm.peer.",
+                )
+            parts.append(deliverable)
         else:
             parts.append(
                 "You have no parent: rlm.agent.send_to_parent is unavailable. Child reports arrive as agent.message inbox events; read their content when useful."
             )
+        if mesh:
+            parts.append(texts["peer_reference"])
     if _has_tool(active_tools, "bash"):
         parts.append(
             "The native bash tool executes a command to completion or timeout and returns text. It does not return a background-job handle."

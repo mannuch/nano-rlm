@@ -198,6 +198,77 @@ class BrokerShellReadRequest(TypedDict):
     max_bytes: Annotated[int, Field(ge=1, le=65_536)]
 
 
+class BrokerPeerSpawnRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.spawn"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    task: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class BrokerPeerListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    all: bool
+
+
+class BrokerPeerGetRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.get"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name_or_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerPeerHandleRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.info", "peer.cancel"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerPeerSendRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.send"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    message: Annotated[str, Field(min_length=1)]
+    in_reply_to: Annotated[str, Field(min_length=1)] | None
+    wake: bool
+
+
+class BrokerPeerResultRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.result"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    yield_after: Annotated[float, Field(ge=0)]
+
+
+class BrokerPeerWaitRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["peer.wait"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    timeout: Annotated[float, Field(ge=0, le=300, allow_inf_nan=False)]
+
+
+class BrokerAgentPromoteRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.promote"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+
+
 class BrokerServicesStartRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["services.start"]
@@ -352,6 +423,14 @@ BrokerRequest = Annotated[
     | BrokerHintsRequest
     | BrokerRefineRequest
     | BrokerShellReadRequest
+    | BrokerPeerSpawnRequest
+    | BrokerPeerListRequest
+    | BrokerPeerGetRequest
+    | BrokerPeerHandleRequest
+    | BrokerPeerSendRequest
+    | BrokerPeerResultRequest
+    | BrokerPeerWaitRequest
+    | BrokerAgentPromoteRequest
     | BrokerServicesStartRequest
     | BrokerServicesListRequest
     | BrokerServicesGetRequest
