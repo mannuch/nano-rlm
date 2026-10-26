@@ -37,6 +37,7 @@ class _Checkpoint:
 class _Session:
     parent_session_id: str | None
     spawned_by_request_id: str | None
+    spawn_edge_type: str = "subagent_call"
     spawn_claimed: bool = False
     last_request_id: str | None = None
     pending_edges: list[_PendingEdge] = field(default_factory=list)
@@ -78,7 +79,8 @@ class _Refinement:
 
 
 class SemanticEdgeTracker:
-    """Semantic request edges shared by every engine in one recursive tree."""
+    """Semantic request edges shared by every engine in one session: the root's tree
+    and, with the mesh enabled, every peer root's tree."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, _Session] = {}
@@ -93,14 +95,22 @@ class SemanticEdgeTracker:
         *,
         parent_session_id: str | None,
         spawned_by_request_id: str | None = None,
+        spawn_edge_type: str = "subagent_call",
     ) -> None:
+        """Register one agent. A peer root is parentless but was spawned by another
+        agent's request: its first request carries a ``peer_spawn`` edge."""
         if session_id in self._sessions:
             return
-        if parent_session_id is None and spawned_by_request_id is not None:
+        if (
+            parent_session_id is None
+            and spawned_by_request_id is not None
+            and spawn_edge_type != "peer_spawn"
+        ):
             raise ValueError("root session cannot have a spawning request")
         self._sessions[session_id] = _Session(
             parent_session_id=parent_session_id,
             spawned_by_request_id=spawned_by_request_id,
+            spawn_edge_type=spawn_edge_type,
         )
 
     def checkpoint(self, session_id: str) -> _Checkpoint:
@@ -167,7 +177,7 @@ class SemanticEdgeTracker:
             session.pending_edges = []
             if not session.spawn_claimed and session.spawned_by_request_id is not None:
                 inbound.append(
-                    _PendingEdge(session.spawned_by_request_id, "subagent_call")
+                    _PendingEdge(session.spawned_by_request_id, session.spawn_edge_type)
                 )
                 session.spawn_claimed = True
             if session.last_request_id is not None and not any(
@@ -314,12 +324,24 @@ class SemanticEdgeTracker:
         )
         session.returned_request_id = request_id
 
+    def promote_session(self, session_id: str, promoter_request_id: str | None) -> None:
+        """A child became a peer root: it has no parent to return to any more, and its
+        next request depends on the promoting request through a ``peer_promote`` edge.
+        Its earlier ``subagent_call`` edge stays and is never matched by a return."""
+        self._sessions[session_id].parent_session_id = None
+        self.deliver_message(session_id, promoter_request_id, edge_type="peer_promote")
+
     def record_subagent_cancel(
-        self, canceller_request_id: str | None, child_session_id: str
+        self,
+        canceller_request_id: str | None,
+        child_session_id: str,
+        *,
+        edge_type: str = "subagent_cancel",
     ) -> None:
         """A parent cancelled a child: a parent -> child edge from the cancelling request to the
         child, mirroring subagent_call (also parent -> child, an action the parent took). At most
-        once per child. The child's cancelled state is derived from this edge, not carried on it."""
+        once per child. The child's cancelled state is derived from this edge, not carried on it.
+        A peer cancelled by its owner or the session root uses ``peer_cancel``."""
         child = self._sessions[child_session_id]
         target_request_id = child.last_request_id
         if (
@@ -332,7 +354,7 @@ class SemanticEdgeTracker:
             {
                 "source_request_id": canceller_request_id,
                 "target_request_id": target_request_id,
-                "type": "subagent_cancel",
+                "type": edge_type,
             }
         )
         child.cancel_recorded = True

@@ -29,7 +29,7 @@ from rlm.broker import (
     result_to_payload,
     write_frame,
 )
-from rlm.config import RuntimeConfig
+from rlm.config import InvocationContext, RuntimeConfig
 from rlm.semantic import SemanticEdgeTracker
 from rlm.harness import local_dir
 from rlm.mcp import (
@@ -92,6 +92,10 @@ MAX_BROKER_CONNECTIONS = 128
 BROKER_INITIAL_FRAME_TIMEOUT_SECONDS = 5
 MAX_INBOX_EVENTS = 10_000
 MAX_MESSAGE_BYTES = 65_536
+PEER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ROOT_PEER_NAME = "root"
+SCRATCHPAD_DIR_NAME = "scratchpad"
+MESH_INDEX_FILE_NAME = "mesh.jsonl"
 
 
 @dataclass
@@ -107,6 +111,11 @@ class _Invocation:
     name: str | None = None
     task: str = ""
     persistent: bool = False
+    kind: str = "child"  # root, child, or peer (a parentless root of its own tree)
+    owner_id: str | None = None  # peers: the agent that spawned or promoted it
+    promotion_pending: bool = False  # taken by the engine at its next turn boundary
+    # Peers: the owner already has the terminal peer.completed event.
+    termination_reported: bool = False
     status: str = "starting"
     created_at: float = field(default_factory=time.time)
     started_at: float = field(default_factory=time.monotonic)
@@ -143,6 +152,12 @@ class _Invocation:
     new_tokens: int = 0
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def _has_waking_events(agent: _Invocation) -> bool:
+    """Events since the last notice/wait that should wake the agent; a peer message
+    sent with wake=False only waits for the next turn boundary."""
+    return any(event.get("wake", True) for event in agent.inbox[agent.announced :])
 
 
 @dataclass
@@ -265,6 +280,7 @@ class SessionTreeSupervisor:
             mcp_servers=dict(mcp_servers or {}),
             status="running",
             persistent=True,
+            kind="root",
         )
         self.root_id = root_id
         self.semantic_edges = semantic_edges or SemanticEdgeTracker()
@@ -277,6 +293,21 @@ class SessionTreeSupervisor:
         self._tool_stats: dict[str, ProgrammaticToolCallStats] = {}
         self._capabilities = {root.capability: root_id}
         self._inference = _InferencePool(runtime_config.policy.max_concurrent_subagents)
+        # The mesh: peer roots beside the root, addressable by mesh-unique name.
+        self.mesh_enabled = runtime_config.policy.max_peers > 0
+        self._peer_names: dict[str, str] = {ROOT_PEER_NAME: root_id}
+        self._mesh_counters = {
+            "peers_spawned": 0,
+            "peers_promoted": 0,
+            "peer_messages": 0,
+            "peer_messages_nowake": 0,
+        }
+        self.scratchpad_dir: Path | None = None
+        # Kernel accounting: start times of live kernels, and closed/busy totals.
+        self._kernel_started: dict[str, float] = {}
+        self._kernel_alive_seconds = 0.0
+        self._kernel_busy_seconds = 0.0
+        self._max_live_kernels = 0
 
     @asynccontextmanager
     async def inference_slot(self, invocation_id: str) -> AsyncIterator[None]:
@@ -320,6 +351,37 @@ class SessionTreeSupervisor:
     def active_calls(self) -> int:
         return len(self._child_tasks)
 
+    @property
+    def _root_dir(self) -> Path:
+        """The root agent's session dir: peers, mesh.jsonl and the scratchpad live here."""
+        return self._invocations[self.root_id].session.dir
+
+    def kernel_started(self, agent_id: str) -> None:
+        self._kernel_started[agent_id] = time.monotonic()
+        self._max_live_kernels = max(self._max_live_kernels, len(self._kernel_started))
+
+    def kernel_stopped(self, agent_id: str) -> None:
+        started = self._kernel_started.pop(agent_id, None)
+        if started is not None:
+            self._kernel_alive_seconds += time.monotonic() - started
+
+    def record_cell(self, seconds: float) -> None:
+        """Add one IPython cell's wall time to the session's kernel busy time."""
+        self._kernel_busy_seconds += seconds
+
+    def mesh_stats(self) -> dict[str, int | float]:
+        """Peer and kernel counters for the session snapshot."""
+        now = time.monotonic()
+        alive = self._kernel_alive_seconds + sum(
+            now - started for started in self._kernel_started.values()
+        )
+        return {
+            **self._mesh_counters,
+            "max_live_kernels": self._max_live_kernels,
+            "kernel_alive_seconds": round(alive, 3),
+            "kernel_busy_seconds": round(self._kernel_busy_seconds, 3),
+        }
+
     async def start(self) -> None:
         if self._server is not None:
             return
@@ -327,6 +389,9 @@ class SessionTreeSupervisor:
             raise RuntimeError("session supervisor is closed")
         if self._mcp_registry is not None:
             await self._mcp_registry.discover()
+        if self.mesh_enabled:
+            self.scratchpad_dir = self._root_dir / SCRATCHPAD_DIR_NAME
+            self.scratchpad_dir.mkdir(exist_ok=True)
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -359,6 +424,10 @@ class SessionTreeSupervisor:
         )
         descendants = ProgrammaticToolCallStats()
         for candidate_id, stats in self._tool_stats.items():
+            if invocation_id == self.root_id and candidate_id != invocation_id:
+                # The root reports for the whole session, peer trees included.
+                descendants = descendants.merge(stats)
+                continue
             parent_id = self._parents.get(candidate_id)
             while parent_id is not None:
                 if parent_id == invocation_id:
@@ -440,6 +509,9 @@ class SessionTreeSupervisor:
             "parent_id": agent.parent_id,
             "name": agent.name,
             "persistent": agent.persistent,
+            "kind": agent.kind,
+            "owner_id": agent.owner_id,
+            "mesh": self.mesh_enabled,
         }
 
     def _info(self, agent: _Invocation) -> dict[str, Any]:
@@ -457,6 +529,9 @@ class SessionTreeSupervisor:
             "error": agent.error,
             "turns": agent.turns,
             "cleanup_error": agent.cleanup_error,
+            "kind": agent.kind,
+            "owner_id": agent.owner_id,
+            "depth": agent.runtime_config.invocation.depth,
         }
 
     def _spawn(
@@ -570,7 +645,9 @@ class SessionTreeSupervisor:
 
     def _wake_agent(self, agent: _Invocation) -> None:
         agent.changed.set()
-        if agent.parent_id is None or agent.status != "idle":
+        # The root is driven by its ACP client; every other idle agent, peers included,
+        # is restarted here.
+        if agent.id == self.root_id or agent.status != "idle":
             return
         if self._budget_exhausted(agent):
             self._fail_instructions(agent, "tree_budget_exhausted")
@@ -583,12 +660,18 @@ class SessionTreeSupervisor:
         agent.runner.add_done_callback(self._tasks.discard)
         agent.runner.add_done_callback(self._child_tasks.discard)
 
-    def _publish(self, target: _Invocation, event: dict) -> str:
-        if event["type"] == "agent.message" and len(target.inbox) >= MAX_INBOX_EVENTS:
+    def _publish(self, target: _Invocation, event: dict, *, wake: bool = True) -> str:
+        """Append an inbox event; ``wake=False`` leaves an idle or waiting target
+        asleep, so the event is seen at the target's next turn boundary."""
+        if (
+            event["type"] in {"agent.message", "peer.message"}
+            and len(target.inbox) >= MAX_INBOX_EVENTS
+        ):
             raise RuntimeError("inbox event limit reached")
         self._record_event(target, event)
         target.inbox.append(event)
-        self._wake_agent(target)
+        if wake:
+            self._wake_agent(target)
         return event["id"]
 
     def _fail_instructions(self, agent: _Invocation, reason: str) -> None:
@@ -761,7 +844,7 @@ class SessionTreeSupervisor:
 
         def ready():
             return (
-                len(agent.inbox) > agent.announced
+                _has_waking_events(agent)
                 or any(
                     not event["read"] and event["type"] == "shell.completed"
                     for event in agent.inbox[agent.announced_quiet :]
@@ -969,6 +1052,7 @@ class SessionTreeSupervisor:
                 directory=parent.session.dir,
                 env={
                     **build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    **self.scratchpad_env(),
                     **parent.shell_env,
                     **(request.get("env") or {}),
                 },
@@ -1098,6 +1182,245 @@ class SessionTreeSupervisor:
             return await self._services.stop(request["name"], request["grace"])
         raise ValueError(f"unknown services operation {op!r}")
 
+    def scratchpad_env(self) -> dict[str, str]:
+        if self.scratchpad_dir is None:
+            return {}
+        return {"RLM_SCRATCHPAD": str(self.scratchpad_dir)}
+
+    def take_promotion(self, invocation_id: str) -> dict | None:
+        """A promotion to apply at this agent's next turn boundary, once."""
+        agent = self._invocations[invocation_id]
+        if not agent.promotion_pending:
+            return None
+        agent.promotion_pending = False
+        return {"name": agent.name, "owner_id": agent.owner_id}
+
+    def rearm_promotion(self, invocation_id: str) -> None:
+        """Apply a promotion again after a rolled-back prompt discarded its rebuilt
+        system prompt."""
+        self._invocations[invocation_id].promotion_pending = True
+
+    def _record_mesh(self, record: dict) -> None:
+        with (self._root_dir / MESH_INDEX_FILE_NAME).open("a", encoding="utf-8") as f:
+            f.write(json.dumps({**record, "created_at": time.time()}) + "\n")
+
+    def _check_peer_slot(self, caller: _Invocation, name: str) -> None:
+        """Validate a new peer name and the session's peer and budget limits."""
+        if not self.mesh_enabled:
+            raise PermissionError("the mesh is disabled (policy.max_peers is 0)")
+        if not PEER_NAME_RE.fullmatch(name):
+            raise ValueError(
+                "peer names are 1-64 letters, digits, '.', '_' or '-', starting with a letter or digit"
+            )
+        if name in self._peer_names or name in self._invocations:
+            raise ValueError("peer name is already reserved in this session")
+        policy = caller.runtime_config.policy
+        peers = (
+            self._mesh_counters["peers_spawned"] + self._mesh_counters["peers_promoted"]
+        )
+        if peers >= policy.max_peers:
+            raise RuntimeError("peer limit reached")
+        if self._budget_exhausted(caller):
+            raise RuntimeError("session budget reached")
+
+    def _spawn_peer(
+        self, caller: _Invocation, scope_id: str, task: str, name: str
+    ) -> _Invocation:
+        self._check_peer_slot(caller, name)
+        root = self._invocations[self.root_id]
+        peer = _Invocation(
+            id=uuid.uuid4().hex,
+            parent_id=None,
+            capability=secrets.token_urlsafe(32),
+            session=Session(Session.child_dir(self._root_dir, prefix="peer")),
+            runtime_config=self._root_config.model_copy(
+                update={"invocation": InvocationContext()}
+            ),
+            cwd=root.cwd,
+            mcp_servers=root.mcp_servers,
+            spawned_by_request_id=self._scopes[scope_id].request_id,
+            name=name,
+            task=task,
+            persistent=True,
+            kind="peer",
+            owner_id=caller.id,
+        )
+        peer_dir = str(peer.session.dir.relative_to(self._root_dir))
+        try:
+            peer.session.write_meta(**self._info(peer))
+            caller.session.log_peer_spawn(peer_dir, peer.id, name, prompt=task)
+            self._record_mesh(
+                {
+                    "type": "peer",
+                    "id": peer.id,
+                    "name": name,
+                    "dir": peer_dir,
+                    "owner_id": caller.id,
+                }
+            )
+        except BaseException:
+            peer.session.close()
+            raise
+        self._mesh_counters["peers_spawned"] += 1
+        self._invocations[peer.id] = peer
+        self._parents[peer.id] = None
+        self._capabilities[peer.capability] = peer.id
+        self._peer_names[name] = peer.id
+        self.semantic_edges.register_session(
+            peer.id,
+            parent_session_id=None,
+            spawned_by_request_id=peer.spawned_by_request_id,
+            spawn_edge_type="peer_spawn",
+        )
+        peer.runner = asyncio.create_task(self._run_child(peer))
+        self._tasks.add(peer.runner)
+        self._child_tasks.add(peer.runner)
+        peer.runner.add_done_callback(self._tasks.discard)
+        peer.runner.add_done_callback(self._child_tasks.discard)
+        return peer
+
+    def _promote(
+        self, caller: _Invocation, scope_id: str, child: _Invocation, name: str
+    ) -> _Invocation:
+        """Turn a direct child into a peer root: it outlives its former parent, keeps its
+        subtree and session dir, and resets to depth 0 at its next turn boundary."""
+        if child.status in {"completed", "failed", "cancelled"}:
+            raise RuntimeError("agent is no longer active")
+        self._check_peer_slot(caller, name)
+        child.parent_id = None
+        self._parents[child.id] = None
+        child.kind = "peer"
+        child.owner_id = caller.id
+        child.name = name
+        child.persistent = True
+        child.runtime_config = child.runtime_config.model_copy(
+            update={"invocation": InvocationContext()}
+        )
+        child.promotion_pending = True
+        self._peer_names[name] = child.id
+        self._mesh_counters["peers_promoted"] += 1
+        self.semantic_edges.promote_session(child.id, self._scopes[scope_id].request_id)
+        self._record_mesh(
+            {
+                "type": "promoted",
+                "id": child.id,
+                "name": name,
+                "dir": str(child.session.dir.relative_to(self._root_dir)),
+                "owner_id": caller.id,
+            }
+        )
+        child.session.write_meta(**self._info(child))
+        return child
+
+    def _mesh_target(self, name_or_id: str) -> _Invocation:
+        """Any agent in the session: a peer by name (``root`` for the root), or any agent
+        by id."""
+        agent_id = self._peer_names.get(name_or_id, name_or_id)
+        agent = self._invocations.get(agent_id)
+        if agent is None:
+            raise ValueError(f"unknown agent {name_or_id!r}")
+        return agent
+
+    async def _peer_operation(self, caller: _Invocation, request: dict) -> Any:
+        if not self.mesh_enabled:
+            raise PermissionError("the mesh is disabled (policy.max_peers is 0)")
+        op = request["op"]
+        scope_id = request["scope_id"]
+        if op == "peer.spawn":
+            return self._info(
+                self._spawn_peer(caller, scope_id, request["task"], request["name"])
+            )
+        if op == "agent.promote":
+            child = self._child(caller, request["agent_id"])
+            return self._info(self._promote(caller, scope_id, child, request["name"]))
+        if op == "peer.list":
+            return [
+                self._info(agent)
+                for agent in self._invocations.values()
+                if request["all"] or agent.kind in {"root", "peer"}
+            ]
+        target = self._mesh_target(request.get("name_or_id", request.get("agent_id")))
+        if op == "peer.send":
+            if target is caller:
+                raise ValueError("cannot send a message to yourself")
+            if target.capability not in self._capabilities or target.status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                raise RuntimeError("agent is no longer active")
+            if self._budget_exhausted(target):
+                raise RuntimeError("cannot send message: session budget exhausted")
+            event = self._event(
+                caller,
+                "peer.message",
+                {
+                    "from_id": caller.id,
+                    "from_name": caller.name,
+                    "text": request["message"],
+                    "in_reply_to": request["in_reply_to"],
+                },
+                self._scopes[scope_id].request_id,
+            )
+            if not request["wake"]:
+                event["wake"] = False
+            message_id = self._publish(target, event, wake=request["wake"])
+            self._mesh_counters["peer_messages"] += 1
+            if not request["wake"]:
+                self._mesh_counters["peer_messages_nowake"] += 1
+            return message_id
+        if op in {"peer.wait", "peer.result"} and target.id == self.root_id:
+            raise ValueError("the root's turns and answers belong to its ACP client")
+        if op == "peer.wait":
+            if not target.done.is_set() and request["timeout"] > 0:
+                try:
+                    await asyncio.wait_for(
+                        target.done.wait(), timeout=request["timeout"]
+                    )
+                except asyncio.TimeoutError:
+                    pass
+        elif op == "peer.cancel":
+            if target.kind != "peer":
+                raise PermissionError("only peers can be cancelled through rlm.peer")
+            if caller.id not in {target.owner_id, self.root_id}:
+                raise PermissionError("only a peer's owner or the root can cancel it")
+            await self._terminate(target)
+            # An idle peer has no running turn to report its cancellation.
+            self._publish_peer_completed(target)
+            if target.status == "cancelled":
+                self.semantic_edges.record_subagent_cancel(
+                    self._scopes[scope_id].request_id,
+                    target.id,
+                    edge_type="peer_cancel",
+                )
+        elif op == "peer.result":
+            yield_after = min(request["yield_after"], RUN_BLOCK_MAX_SECONDS)
+            if not target.done.is_set() and yield_after > 0:
+                try:
+                    await asyncio.wait_for(target.done.wait(), timeout=yield_after)
+                except asyncio.TimeoutError:
+                    pass
+            if target.status == "failed":
+                raise RuntimeError(target.error or "agent failed")
+            if target.status == "cancelled":
+                raise RuntimeError(target.error or "agent cancelled")
+            if target.result is not None:
+                self.semantic_edges.deliver_message(
+                    caller.id, target.result_request_id, edge_type="agent_message"
+                )
+            return agent_result_to_payload(
+                AgentResult(
+                    status=target.status,
+                    answer=None if target.result is None else target.result.answer,
+                    session_dir=target.session.dir,
+                    usage=TokenUsage()
+                    if target.result is None
+                    else target.result.usage,
+                    turns=target.turns,
+                )
+            )
+        return self._info(target)
+
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
@@ -1133,6 +1456,8 @@ class SessionTreeSupervisor:
             return await self._shell_operation(parent, request)
         if op.startswith("services."):
             return await self._services_operation(parent, request)
+        if op.startswith("peer.") or op == "agent.promote":
+            return await self._peer_operation(parent, request)
         if op.startswith("hints."):
             tags = set(request.get("tags") or [])
             if op == "hints.mute":
@@ -1181,7 +1506,7 @@ class SessionTreeSupervisor:
                 self.semantic_edges.deliver_message(
                     parent.id,
                     event["source_request_id"]
-                    if event["type"].startswith("agent.")
+                    if event["type"].startswith(("agent.", "peer."))
                     else None,
                     edge_type="agent_message",
                 )
@@ -1342,7 +1667,11 @@ class SessionTreeSupervisor:
                     supervisor=self,
                     invocation_id=child.id,
                 )
-                child.result = await child.engine.prompt(child.task)
+                child.result = await (
+                    child.engine.prompt(child.task, message_type="peer_task")
+                    if child.kind == "peer"
+                    else child.engine.prompt(child.task)
+                )
             else:
                 instructions = self.take_instructions(child.id, include_queue=True)
                 prompt = (
@@ -1378,6 +1707,8 @@ class SessionTreeSupervisor:
                 pass  # Cleanup errors remain queryable and can be retried by cancel().
             finally:
                 child.done.set()
+                if child.kind == "peer":
+                    self._publish_peer_completed(child)
                 parent = self._invocations.get(child.parent_id)
                 if parent is not None and parent.capability in self._capabilities:
                     self._publish(
@@ -1405,9 +1736,39 @@ class SessionTreeSupervisor:
                         ),
                     )
                 if child.status == "idle" and (
-                    child.instructions or len(child.inbox) > child.announced
+                    child.instructions or _has_waking_events(child)
                 ):
                     self._wake_agent(child)
+
+    def _publish_peer_completed(self, peer: _Invocation) -> None:
+        """Tell a peer's owner about each answer (status idle) and its termination."""
+        owner = self._invocations.get(peer.owner_id)
+        if owner is None or owner.capability not in self._capabilities:
+            return
+        if peer.status != "idle":
+            if peer.termination_reported:
+                return
+            peer.termination_reported = True
+        self._publish(
+            owner,
+            self._event(
+                peer,
+                "peer.completed",
+                {
+                    "peer_id": peer.id,
+                    "name": peer.name,
+                    "status": peer.status,
+                    "answer": (
+                        peer.result.answer[-COMPLETED_TAIL_BYTES:]
+                        if peer.result is not None and peer.result.answer
+                        else None
+                    ),
+                    "turns": peer.result.turns if peer.result is not None else None,
+                    "error": peer.error,
+                },
+                self.semantic_edges.last_request_id(peer.id),
+            ),
+        )
 
     async def _close_agent_subscriptions(self, agent_id: str) -> None:
         try:
@@ -1564,7 +1925,7 @@ class SessionTreeSupervisor:
                 *(
                     self._terminate(child)
                     for child in list(self._invocations.values())
-                    if child.parent_id == self.root_id
+                    if child.parent_id == self.root_id or child.kind == "peer"
                 ),
                 self._subscriptions.close(),
                 self._shell_jobs.close(),

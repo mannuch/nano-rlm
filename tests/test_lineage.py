@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from rlm.client import model_call_headers
 from rlm.semantic import SemanticEdgeTracker
 
@@ -347,3 +349,85 @@ def test_record_subagent_cancel_is_a_parent_to_child_edge():
     # recorded at most once per child
     lineage.record_subagent_cancel(canceller, "child")
     assert sum(e["type"] == "subagent_cancel" for e in lineage.snapshot()["edges"]) == 1
+
+
+def _edge_types(lineage: SemanticEdgeTracker, target: str) -> set[tuple[str, str]]:
+    return {
+        (edge["source_request_id"], edge["type"])
+        for edge in lineage.snapshot()["edges"]
+        if edge["target_request_id"] == target
+    }
+
+
+def test_peer_spawn_is_a_parentless_spawn_edge():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    spawn_request = _finish(lineage, "root")
+    with pytest.raises(ValueError, match="root session cannot have a spawning request"):
+        lineage.register_session(
+            "bad", parent_session_id=None, spawned_by_request_id=spawn_request
+        )
+    lineage.register_session(
+        "peer",
+        parent_session_id=None,
+        spawned_by_request_id=spawn_request,
+        spawn_edge_type="peer_spawn",
+    )
+    peer_request = _finish(lineage, "peer")
+
+    assert _edge_types(lineage, peer_request) == {(spawn_request, "peer_spawn")}
+    with pytest.raises(ValueError, match="cannot return to a parent"):
+        lineage.finish_subagent("peer")
+
+
+def test_peer_messages_cross_trees_as_agent_message_edges():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    lineage.register_session("peer", parent_session_id=None)
+    root_request = _finish(lineage, "root")
+    peer_request = _finish(lineage, "peer")
+    lineage.deliver_message("peer", root_request, edge_type="agent_message")
+    peer_next = _finish(lineage, "peer")
+    lineage.deliver_message("root", peer_next, edge_type="agent_message")
+    root_next = _finish(lineage, "root")
+
+    assert _edge_types(lineage, peer_next) == {
+        (root_request, "agent_message"),
+        (peer_request, "continuation"),
+    }
+    assert _edge_types(lineage, root_next) == {
+        (peer_next, "agent_message"),
+        (root_request, "continuation"),
+    }
+
+
+def test_promotion_detaches_child_and_links_the_promoting_request():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    spawn_request = _finish(lineage, "root")
+    lineage.register_session(
+        "child", parent_session_id="root", spawned_by_request_id=spawn_request
+    )
+    child_request = _finish(lineage, "child")
+    promote_request = _finish(lineage, "root")
+    lineage.promote_session("child", promote_request)
+    child_next = _finish(lineage, "child")
+
+    assert _edge_types(lineage, child_request) == {(spawn_request, "subagent_call")}
+    assert _edge_types(lineage, child_next) == {
+        (promote_request, "peer_promote"),
+        (child_request, "continuation"),
+    }
+    with pytest.raises(ValueError, match="cannot return to a parent"):
+        lineage.finish_subagent("child")
+
+
+def test_peer_cancel_uses_its_own_edge_type():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    lineage.register_session("peer", parent_session_id=None)
+    peer_request = _finish(lineage, "peer")
+    cancel_request = _finish(lineage, "root")
+    lineage.record_subagent_cancel(cancel_request, "peer", edge_type="peer_cancel")
+
+    assert _edge_types(lineage, peer_request) == {(cancel_request, "peer_cancel")}

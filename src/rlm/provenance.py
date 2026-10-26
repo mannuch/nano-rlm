@@ -32,7 +32,7 @@ def runtime_event(kind: str, text: str, **attrs: object) -> tuple[dict, dict]:
 
     kind: notice (inbox count and hints), recovery (kernel restart), nudge (empty or
     plan-like reply), compaction (context summary), skills (skills added after the
-    system prompt was built)."""
+    system prompt was built), promotion (a child became a peer root)."""
     provenance = {
         "source": "runtime",
         "kind": kind,
@@ -44,14 +44,17 @@ def runtime_event(kind: str, text: str, **attrs: object) -> tuple[dict, dict]:
     return {"role": "user", "content": content}, provenance
 
 
-def agent_input(text: str, *, agent: str | None, kind: str) -> tuple[dict, dict]:
-    """A user-role message carrying a parent agent's instruction (kind: instruction or
-    steer), plus its provenance record."""
-    provenance = {"source": "agent", "from": "parent", "kind": kind}
+def agent_input(
+    text: str, *, agent: str | None, kind: str, sender: str = "parent"
+) -> tuple[dict, dict]:
+    """A user-role message carrying another agent's input, plus its provenance record:
+    a parent's instruction or steer, or a peer's task from the owner that spawned it
+    (sender "owner", kind "task")."""
+    provenance = {"source": "agent", "from": sender, "kind": kind}
     if agent:
         provenance["agent"] = agent
     content = (
-        f'<{AGENT_INPUT} from="parent"{_attrs({"agent": agent, "kind": kind})}>\n'
+        f'<{AGENT_INPUT} from="{sender}"{_attrs({"agent": agent, "kind": kind})}>\n'
         f"{text}\n</{AGENT_INPUT}>"
     )
     return {"role": "user", "content": content}, provenance

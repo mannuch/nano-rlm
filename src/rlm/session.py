@@ -165,6 +165,18 @@ class Session:
             )
         return message
 
+    def log_peer_spawn(self, peer_dir: str, peer_id: str, name: str, *, prompt: str):
+        """Record a peer this agent spawned; peer_dir is relative to the root session dir."""
+        self.log(
+            {
+                "type": "peer_spawn",
+                "peer_dir": peer_dir,
+                "peer_id": peer_id,
+                "name": name,
+                "prompt": prompt,
+            }
+        )
+
     def log_sub_spawn(self, child_name: str, command: str, *, prompt: str):
         self.log(
             {
@@ -198,10 +210,14 @@ class Session:
             return stats
 
         aggregate = ChildSessionAggregate()
+        # Peer roots (peer-*) only ever sit directly under the root session dir; a
+        # promoted peer stays in its sub-* dir, so each dir is counted exactly once.
         aggregate.num_sessions = sum(
-            1 for path in self.dir.rglob("sub-*") if path.is_dir()
+            1
+            for path in [*self.dir.rglob("sub-*"), *self.dir.glob("peer-*")]
+            if path.is_dir()
         )
-        for child_dir in self.dir.glob("sub-*"):
+        for child_dir in [*self.dir.glob("sub-*"), *self.dir.glob("peer-*")]:
             if child_dir.is_dir():
                 aggregate.absorb(subtree_stats(child_dir))
         return aggregate
@@ -258,10 +274,11 @@ class Session:
         self._msg_file.close()
 
     @staticmethod
-    def child_dir(parent_dir: Path | str) -> Path:
-        """Create and return a new child session directory under parent_dir."""
+    def child_dir(parent_dir: Path | str, prefix: str = "sub") -> Path:
+        """Create and return a new session directory under parent_dir: ``sub-*`` for a
+        child, ``peer-*`` for a peer root under the session's root directory."""
         child_id = uuid.uuid4().hex[:8]
-        child = Path(parent_dir) / f"sub-{child_id}"
+        child = Path(parent_dir) / f"{prefix}-{child_id}"
         child.mkdir()
         return child
 
