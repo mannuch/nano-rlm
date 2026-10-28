@@ -91,6 +91,7 @@ class _RuntimeMetadata(_ContractModel):
     search_api_key: str | None
     harness: HarnessConfig | None = None
     prompt_overrides: dict[str, str] | None = None
+    network_block: list[str] = Field(default_factory=list)
 
     @field_validator("prompt_overrides")
     @classmethod
@@ -282,6 +283,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             search_api_key=payload.search_api_key,
             harness=payload.harness or HarnessConfig(),
             prompt_overrides=payload.prompt_overrides or {},
+            network_block=tuple(payload.network_block),
         ),
         payload.session_id,
     )
