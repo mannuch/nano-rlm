@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from rlm.network import NetworkBlocklist
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 
 
@@ -226,6 +227,8 @@ class RuntimeConfig(_ConfigModel):
     prompt_overrides: dict[str, str] = Field(default_factory=dict)
     """Replacement texts for named runtime prompts (see ``rlm.prompt.DEFAULT_PROMPTS``),
     applied to every engine in the tree."""
+    network_block: NetworkBlocklist = ()
+    """Search-result destination rules shared by every agent in the session tree."""
 
     @field_validator("prompt_overrides")
     @classmethod
