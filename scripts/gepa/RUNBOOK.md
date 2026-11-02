@@ -1,7 +1,7 @@
 # Running a prompt optimization
 
-Everything runs from the repository root on `main`. See the "Prompt optimization"
-section of the README for what is being optimized and how sessions are scored.
+Everything runs from the repository root on `main`. See
+[docs/prompt-optimization.md](../../docs/prompt-optimization.md) for what is being optimized and how sessions are scored.
 
 ## 1. Sync
 

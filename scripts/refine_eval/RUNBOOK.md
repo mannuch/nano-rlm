@@ -2,8 +2,8 @@
 
 Everything runs from the repository root. The eval checks whether harness refinement
 works: whether a pass refines when it should, targets the right thing and writes the
-right edits. See "Refinement" and "TypeSafe review judge" in the README for the
-machinery under test.
+right edits. See "Refinement" and "TypeSafe review judge" in
+[docs/continual-harness.md](../../docs/continual-harness.md) for the machinery under test.
 
 Each case is one live session:
 
