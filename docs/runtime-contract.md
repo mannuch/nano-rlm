@@ -61,6 +61,7 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 | `compaction_tail_tokens` | 12,000 | Newest messages kept verbatim after a compaction, capped at a quarter of the threshold; 0 keeps none ([The verbatim tail](context.md#the-verbatim-tail)) |
 | `compaction_prompt_tokens` | 4,000 | Largest current prompt kept verbatim after a compaction; 0 never keeps it ([The pinned prompt](context.md#the-pinned-prompt)) |
 | `allow_git` | false | Lift the guard that refuses Git commands reaching beyond the current branch (other refs, branch and tag listings, `clone`, `fetch`, `pull`) |
+| `network_guidance` | true | Keep the prompt guidance that assumes outbound network access: installing extra kernel packages, and the online-solutions clause of the Git guard. Set it to false on a box with no network |
 
 **Model-call admission.** `max_concurrent_subagents` bounds calls across the tree. Queued calls closer to the root go first, FIFO within a depth, and calls in flight are not preempted, so continuous shallow work can delay deeper agents. Tools, child waits and the backoff between outer retries hold no slot; the SDK's own retries stay within one. The limit is per tree: a cap across trees belongs in the runner or inference gateway.
 

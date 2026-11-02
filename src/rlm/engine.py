@@ -307,6 +307,7 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.network_guidance = config.policy.network_guidance
         self.harness_config = config.harness
         self._harness: HarnessView | None = None
         self._skills_dir = (
@@ -1972,6 +1973,7 @@ class RLMEngine:
                 "compaction_tail_tokens": self.compaction_tail_tokens,
                 "compaction_prompt_tokens": self.compaction_prompt_tokens,
                 "allow_git": self.runtime_config.policy.allow_git,
+                "network_guidance": self.runtime_config.policy.network_guidance,
                 "harness_enabled": self.harness_config.enabled,
                 "harness_global": self.harness_config.global_dir is not None,
                 "auto_refine": self.harness_config.auto_refine,
@@ -2422,6 +2424,7 @@ class RLMEngine:
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
+            network_guidance=self.network_guidance,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
             skill_docs=[self._kernel_skill_doc(doc) for doc in skill_docs],
