@@ -1,9 +1,10 @@
-"""The continual harness across split execution.
+"""The kernel's continual harness, served by the supervisor.
 
-In split execution the kernel runs in a workspace worker while the harness stores stay
-on the engine's machine. ``RemoteHarnessView`` gives the kernel the ``HarnessView`` API
-over the broker, and the supervisor answers each call with :func:`dispatch` against the
-calling agent's own view, so the kernel never names a store path.
+``RemoteHarnessView`` gives the kernel the ``HarnessView`` API over the broker, like
+``rlm.agent`` and ``rlm.refine``, and the supervisor answers each call with
+:func:`dispatch` against the calling agent's own view, so the kernel never names a store
+path. In split execution the stores also stay on the engine's machine, away from the
+workspace worker.
 """
 
 from __future__ import annotations
@@ -22,10 +23,27 @@ from rlm.harness import (
     local_dir,
 )
 
+BROKERED_ENV = "RLM_HARNESS_BROKERED"
+"""Set to ``"1"`` in a kernel whose harness is enabled: the supervisor serves its view."""
+
 REMOTE_ENV = "RLM_HARNESS_REMOTE"
-"""Set to ``"1"`` in a split-execution kernel whose harness lives with the engine."""
+"""Set to ``"1"`` in a split-execution kernel, whose past sessions stay on the engine's
+machine."""
 
 METHODS: tuple[str, ...] = get_args(broker.HarnessMethod)
+
+READ_METHODS = frozenset(
+    {
+        "entries",
+        "list",
+        "get",
+        "search",
+        "refinements",
+        "counts",
+        "overview",
+        "snapshot",
+    }
+)
 
 _RAISED: tuple[type[Exception], ...] = (
     PermissionError,
@@ -49,6 +67,23 @@ def agent_view(
     return build_view(
         local_dir(session_dir), global_dir=config.global_dir, ancestor_dirs=ancestors
     )
+
+
+def visible_episode(view: HarnessView | None, session_dir: str) -> Path:
+    """``session_dir`` resolved, when it is a past session this agent's harness records
+    as an episode: the only other sessions a kernel reads through the supervisor."""
+    requested = Path(session_dir).resolve()
+    episodes = view.list("episode") if view is not None else []
+    visible = {
+        Path(str(entry.metadata["session_dir"])).resolve()
+        for entry in episodes
+        if entry.metadata.get("session_dir")
+    }
+    if requested not in visible:
+        raise PermissionError(
+            f"{session_dir} is not an episode in this agent's harness"
+        )
+    return requested
 
 
 def encode(value: Any) -> Any:
@@ -81,7 +116,12 @@ def decode(value: Any) -> Any:
 
 
 def dispatch(
-    view: HarnessView | None, method: str, args: list[Any], kwargs: dict[str, Any]
+    view: HarnessView | None,
+    method: str,
+    args: list[Any],
+    kwargs: dict[str, Any],
+    *,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     """Run one kernel harness call on ``view``: ``{"value": ...}``, or ``{"raised":
     {"type", "message"}}`` for an error the kernel should see with its type."""
@@ -90,6 +130,8 @@ def dispatch(
     try:
         if view is None:
             raise RuntimeError("the continual harness is disabled for this session")
+        if read_only and method not in READ_METHODS:
+            raise PermissionError("another session's harness is read-only")
         result = getattr(view, method)(*args, **kwargs)
     except _RAISED as error:
         kind = next(cls for cls in _RAISED if isinstance(error, cls))
@@ -99,15 +141,18 @@ def dispatch(
 
 
 class RemoteHarnessView:
-    """The harness layers visible to this agent, kept on the engine's machine: each
-    call runs on them through the broker, with ``HarnessView``'s signature, behaviour
-    and errors."""
+    """The harness layers visible to this agent, or a past episode's local store (read
+    only), kept by the supervisor: each call runs on them through the broker, with
+    ``HarnessView``'s signature, behaviour and errors."""
+
+    def __init__(self, session_dir: str | Path | None = None):
+        self._session_dir = None if session_dir is None else str(session_dir)
 
     def __getattr__(self, name: str) -> Any:
         if name in _STORE_ATTRIBUTES:
             raise AttributeError(
-                f"HarnessView.{name} holds the engine's stores, which split execution "
-                "keeps out of the kernel; use the view's read and write methods"
+                f"HarnessView.{name} holds the stores, which the supervisor keeps out "
+                "of the kernel; use the view's read and write methods"
             )
         raise AttributeError(
             f"{type(self).__name__!r} object has no attribute {name!r}"
@@ -117,8 +162,9 @@ class RemoteHarnessView:
 def _remote_method(name: str):
     @functools.wraps(getattr(HarnessView, name))
     def call(self: RemoteHarnessView, *args: Any, **kwargs: Any) -> Any:
+        target = {} if self._session_dir is None else {"session_dir": self._session_dir}
         response = broker.request_sync(
-            "harness.call", method=name, args=list(args), kwargs=kwargs
+            "harness.call", method=name, args=list(args), kwargs=kwargs, **target
         )
         if "raised" in response:
             raised = response["raised"]

@@ -330,7 +330,7 @@ HarnessMethod = Literal[
     "update_subagent",
     "delete_subagent",
 ]
-"""The ``HarnessView`` methods a split-execution kernel may call on its own view."""
+"""The ``HarnessView`` methods a kernel may call on its view."""
 
 
 class BrokerHarnessCallRequest(TypedDict):
@@ -341,6 +341,7 @@ class BrokerHarnessCallRequest(TypedDict):
     method: HarnessMethod
     args: list[Any]
     kwargs: dict[str, Any]
+    session_dir: NotRequired[Annotated[str, Field(min_length=1, max_length=4096)]]
 
 
 class BrokerHarnessHistoryRequest(TypedDict):

@@ -45,18 +45,15 @@ from rlm.compaction import (
 )
 from rlm.config import RuntimeConfig
 from rlm.harness import (
-    ANCESTOR_DIRS_ENV,
     EPISODE_CONTENT_CHARS,
     EPISODE_PROMPTS,
-    GLOBAL_DIR_ENV,
-    LOCAL_DIR_ENV,
     SKILLS_DIR_ENV,
     HarnessView,
     build_view,
     episode_path,
     local_dir,
 )
-from rlm.harness_remote import REMOTE_ENV
+from rlm.harness_remote import BROKERED_ENV, REMOTE_ENV
 from rlm.skills_sync import WORKER_DIR_NAME
 from rlm.semantic import Compaction, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
@@ -777,16 +774,12 @@ class RLMEngine:
                 global_dir=self.harness_config.global_dir,
                 ancestor_dirs=ancestors,
             )
+            # The kernel reaches the stores through the broker.
+            harness_dirs[BROKERED_ENV] = "1"
             if self.runtime_config.split_execution:
-                # The stores stay on this machine and the kernel reaches them through
-                # the broker; the worker names its own mirrored skills directory.
+                # The worker names its own mirrored skills directory.
                 harness_dirs[REMOTE_ENV] = "1"
             else:
-                harness_dirs[LOCAL_DIR_ENV] = str(self._harness.local.dir)
-                harness_dirs[GLOBAL_DIR_ENV] = (
-                    str(self._harness.global_.dir) if self._harness.global_ else ""
-                )
-                harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
                 harness_dirs[SKILLS_DIR_ENV] = self._skills_dir or ""
 
         repl_type = IPythonREPL

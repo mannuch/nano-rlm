@@ -478,10 +478,14 @@ h.update_memory("project_venv", "Project venv", "...", global_=True)   # needs g
 `update_*`/`delete_*` take the bare id or a `local:`/`global:` prefix; ancestor entries raise
 `PermissionError`. Every method carries a docstring, so `help(h)` (or `help(h.create_skill)`) is
 the full reference; the system prompt only lists the essential calls. A `skill` entry describes how to use an already-importable Python tool; it is not a
-package (see [Python tool package contract](#python-tool-package-contract) for the on-disk package contract). Stores are rewritten
-atomically under a file lock and reloaded when another writer changed them, so the engine
-and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
-store outside a running session.
+package (see [Python tool package contract](#python-tool-package-contract) for the on-disk package contract). Like
+`rlm.agent`, the kernel's view is served by the session supervisor through the broker:
+each call runs on the calling agent's own stores and needs an active cell, and the kernel
+never names a store. The store objects themselves (`h.local`, `h.layers()`) are not
+available in the kernel. Stores are rewritten atomically under a file lock and reloaded
+when another writer changed them, so the engine and the supervisor share one file safely.
+`harness(session_dir=...)` loads a session's local store directly, for example outside a
+running session.
 
 ### Entry schema
 
@@ -754,12 +758,7 @@ holds episodes cannot be read by builds that predate the kind.
 ### In split execution
 
 With [separate tool execution](#separate-tool-execution) the harness keeps working as
-described above, while its state stays with the engine. The kernel gets
-`RLM_HARNESS_REMOTE=1` instead of the store paths, and `rlm.harness.harness()` returns a
-view with `HarnessView`'s methods, signatures and error types. Each call runs on the
-calling agent's own stores in the supervisor, through the broker, so the kernel never
-names a store and the stores' locks, ancestors and global sharing are unchanged. The
-store objects themselves (`h.local`, `h.layers()`) are not available in the kernel.
+described above, and its stores stay with the engine.
 
 The worker keeps a mirror of `$RLM_HOME/skills` in its session directory, filled before
 the kernel starts and updated before each tool call, so every skill the prompt lists is
@@ -771,9 +770,10 @@ writes only regular files inside skill folders. It rejects absolute paths, `..`,
 paths through symlinks, and never imports what it receives. Files over 4 MiB and
 bytecode are not mirrored.
 
-`history(session_dir)` for a path the worker doesn't have asks the supervisor. The
-supervisor serves the ledger in pages when the path is the `session_dir` of an episode
-in the agent's harness, and refuses any other path.
+`history(session_dir)` and `harness(session_dir)` for a path the worker doesn't have ask
+the supervisor. The supervisor serves the ledger in pages, or the session's local store
+read-only, when the path is the `session_dir` of an episode in the agent's harness, and
+refuses any other path.
 
 ## Tools
 

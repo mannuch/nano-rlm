@@ -216,20 +216,26 @@ def test_harness_config_and_ancestor_context():
 
 
 def test_harness_env_resolution(tmp_path, monkeypatch):
-    monkeypatch.delenv("RLM_HARNESS_LOCAL_DIR", raising=False)
+    monkeypatch.delenv("RLM_HARNESS_BROKERED", raising=False)
+    monkeypatch.delenv("RLM_HARNESS_REMOTE", raising=False)
     with pytest.raises(RuntimeError, match="disabled"):
         harness()
     explicit = harness(session_dir=tmp_path / "s")
     assert explicit.local.dir == local_dir(tmp_path / "s").resolve()
 
-    monkeypatch.setenv("RLM_HARNESS_LOCAL_DIR", str(tmp_path / "l"))
-    monkeypatch.setenv("RLM_HARNESS_GLOBAL_DIR", "")
-    monkeypatch.setenv(
-        "RLM_HARNESS_ANCESTOR_DIRS", str(tmp_path / "a1") + ":" + str(tmp_path / "a2")
-    )
+    monkeypatch.setenv("RLM_HARNESS_BROKERED", "1")
     view = harness()
-    assert view.global_ is None
-    assert [s.dir.name for s in view.ancestors] == ["a1", "a2"]
+    assert isinstance(view, RemoteHarnessView)
+    with pytest.raises(RuntimeError, match="outside an active cell"):
+        view.list("memory")
+    with pytest.raises(AttributeError, match="keeps out of the kernel"):
+        view.local  # noqa: B018
+
+    monkeypatch.setenv("RLM_HARNESS_REMOTE", "1")
+    assert isinstance(harness(session_dir=tmp_path / "elsewhere"), RemoteHarnessView)
+    assert isinstance(harness(session_dir=tmp_path / "s"), RemoteHarnessView)
+    (local_dir(tmp_path / "s")).mkdir(parents=True)
+    assert harness(session_dir=tmp_path / "s").local.dir == explicit.local.dir
 
 
 def _split(config: RuntimeConfig) -> RuntimeConfig:
@@ -243,10 +249,9 @@ def _split(config: RuntimeConfig) -> RuntimeConfig:
 
 @pytest.mark.parametrize("split", [False, True])
 async def test_engine_renders_harness_and_kernel_writes_to_it(session, tmp_path, split):
-    """The kernel's rlm.harness view targets the session's store, and the system
-    prompt carries the harness block with what was already recorded. Under split
-    execution the kernel reaches the same store through the broker, with the same
-    errors, and never sees its path."""
+    """The kernel's rlm.harness view targets the session's store through the broker,
+    with the view's errors and without its path, and the system prompt carries the
+    harness block with what was already recorded."""
     global_dir = tmp_path / "global"
     HarnessStore(global_dir, scope="global").create(
         "prompt", "Global policy", "verify before claiming success"
@@ -280,11 +285,8 @@ async def test_engine_renders_harness_and_kernel_writes_to_it(session, tmp_path,
     output = tool_result(client)
     assert "verify before claiming success" in output
     assert "ValueError:" in output
-    if split:
-        assert "split execution keeps out of the kernel" in output
-        assert str(local_dir(session.dir).resolve()) not in output
-    else:
-        assert str(local_dir(session.dir).resolve()) in output
+    assert "keeps out of the kernel" in output
+    assert str(local_dir(session.dir).resolve()) not in output
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert HARNESS_INTRO in system_prompt
     assert "[global:global_policy] Global policy" in system_prompt
@@ -306,7 +308,7 @@ async def test_disabled_harness_leaves_prompt_and_kernel_untouched(session):
                     DummyToolCall(
                         "ipython",
                         {
-                            "code": "import os; print(os.environ.get('RLM_HARNESS_LOCAL_DIR'))"
+                            "code": "import os; print(os.environ.get('RLM_HARNESS_BROKERED'))"
                         },
                     )
                 ]
@@ -847,8 +849,8 @@ def test_view_methods_are_self_documenting():
 
 
 def test_remote_harness_dispatch_mirrors_the_view(tmp_path):
-    """A split-execution kernel's calls run on the view its engine would build, and
-    come back with the same values, layers and error types."""
+    """A kernel's calls run on the view its engine would build, and come back with the
+    same values, layers and error types."""
     parent = tmp_path / "parent"
     HarnessStore(parent).create("memory", "Parent lesson", "from the parent")
     view = agent_view(
@@ -873,6 +875,13 @@ def test_remote_harness_dispatch_mirrors_the_view(tmp_path):
         call("delete_memory", "ancestor:parent_lesson")["raised"]["type"]
         == "PermissionError"
     )
+    assert dispatch(view, "list", ["memory"], {}, read_only=True)["value"]
+    assert dispatch(view, "create_memory", ["New", "x"], {}, read_only=True) == {
+        "raised": {
+            "type": "PermissionError",
+            "message": "another session's harness is read-only",
+        }
+    }
     assert dispatch(None, "list", [], {}) == {
         "raised": {
             "type": "RuntimeError",
@@ -890,7 +899,7 @@ async def test_split_kernel_reads_a_past_episode_through_the_supervisor(
     session, tmp_path
 ):
     """An episode's session directory is on the engine's machine; the supervisor
-    serves its ledger to a split kernel, and nothing else."""
+    serves its ledger and store to a split kernel, and nothing else."""
     harness_config = HarnessConfig(
         global_dir=str(tmp_path / "global"), record_episodes=True
     )
@@ -908,6 +917,10 @@ async def test_split_kernel_reads_a_past_episode_through_the_supervisor(
         f"    await rlm.history({str(tmp_path / 'elsewhere')!r})\n"
         "except RuntimeError as error:\n"
         "    print('refused:', error)\n"
+        "try:\n"
+        f"    rlm.harness.harness({str(tmp_path / 'elsewhere')!r}).list('memory')\n"
+        "except RuntimeError as error:\n"
+        "    print('store refused:', error)\n"
     )
     client = DummyClient(
         [
@@ -925,3 +938,4 @@ async def test_split_kernel_reads_a_past_episode_through_the_supervisor(
     assert (
         "refused:" in output and "is not an episode in this agent's harness" in output
     )
+    assert "store refused:" in output

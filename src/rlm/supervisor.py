@@ -1092,10 +1092,11 @@ class SessionTreeSupervisor:
         }
 
     def _harness_operation(self, parent: _Invocation, request: dict) -> Any:
-        """A split-execution kernel's harness call or episode read, against the view
-        its engine builds: the kernel names no store, and reads only past sessions its
-        harness records as episodes."""
-        from rlm.harness_remote import agent_view, dispatch
+        """A kernel's harness call or episode read, against the view its engine
+        builds: the kernel names no store, and reads only past sessions its harness
+        records as episodes."""
+        from rlm.harness import build_view, local_dir
+        from rlm.harness_remote import agent_view, dispatch, visible_episode
         from rlm.history import read_page
 
         view = agent_view(
@@ -1104,19 +1105,13 @@ class SessionTreeSupervisor:
             parent.runtime_config.invocation.ancestor_harness_dirs,
         )
         if request["op"] == "harness.call":
-            return dispatch(view, request["method"], request["args"], request["kwargs"])
-        requested = Path(request["session_dir"]).resolve()
-        episodes = view.list("episode") if view is not None else []
-        visible = {
-            Path(str(entry.metadata["session_dir"])).resolve()
-            for entry in episodes
-            if entry.metadata.get("session_dir")
-        }
-        if requested not in visible:
-            raise PermissionError(
-                f"{request['session_dir']} is not an episode in this agent's harness"
-            )
-        records, offset = read_page(requested / "messages.jsonl", request["offset"])
+            call = (request["method"], request["args"], request["kwargs"])
+            if "session_dir" not in request:
+                return dispatch(view, *call)
+            episode = visible_episode(view, request["session_dir"])
+            return dispatch(build_view(local_dir(episode)), *call, read_only=True)
+        episode = visible_episode(view, request["session_dir"])
+        records, offset = read_page(episode / "messages.jsonl", request["offset"])
         return {"records": records, "next": offset}
 
     async def _services_operation(self, parent: _Invocation, request: dict) -> Any:
