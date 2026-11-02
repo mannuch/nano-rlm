@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,8 @@ from rlm.harness import (
     episode_path,
     local_dir,
 )
+from rlm.harness_remote import REMOTE_ENV
+from rlm.skills_sync import WORKER_DIR_NAME
 from rlm.semantic import Compaction, SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import (
@@ -89,6 +91,7 @@ from rlm.tools import (
     SKILLS_ROOT,
     BuiltinTool,
     IPythonREPL,
+    SkillDoc,
     ToolContext,
     ToolOutcome,
     discover_skill_docs,
@@ -774,12 +777,17 @@ class RLMEngine:
                 global_dir=self.harness_config.global_dir,
                 ancestor_dirs=ancestors,
             )
-            harness_dirs[LOCAL_DIR_ENV] = str(self._harness.local.dir)
-            harness_dirs[GLOBAL_DIR_ENV] = (
-                str(self._harness.global_.dir) if self._harness.global_ else ""
-            )
-            harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
-            harness_dirs[SKILLS_DIR_ENV] = self._skills_dir or ""
+            if self.runtime_config.split_execution:
+                # The stores stay on this machine and the kernel reaches them through
+                # the broker; the worker names its own mirrored skills directory.
+                harness_dirs[REMOTE_ENV] = "1"
+            else:
+                harness_dirs[LOCAL_DIR_ENV] = str(self._harness.local.dir)
+                harness_dirs[GLOBAL_DIR_ENV] = (
+                    str(self._harness.global_.dir) if self._harness.global_ else ""
+                )
+                harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
+                harness_dirs[SKILLS_DIR_ENV] = self._skills_dir or ""
 
         repl_type = IPythonREPL
         repl_options = {}
@@ -790,6 +798,8 @@ class RLMEngine:
             repl_options["command"] = self.runtime_config.execution_command
             repl_options["tcp"] = self.runtime_config.execution_tcp
             repl_options["tools"] = [tool.name for tool in self._active_tools]
+            repl_options["skills_root"] = SKILLS_ROOT
+            repl_options["write_back"] = self._skills_dir is not None
         self._repl = repl_type(
             **repl_options,
             cwd=self.cwd,
@@ -908,7 +918,7 @@ class RLMEngine:
         if not new:
             return
         self._known_skills |= {doc.location for doc in new}
-        lines = [new_skill_line(doc) for doc in new]
+        lines = [new_skill_line(self._kernel_skill_doc(doc)) for doc in new]
         self._new_skill_lines.extend(lines)
         text = NEW_SKILLS_NOTICE % {"skills": "\n".join(lines)}
         if self._skills_dir is not None:
@@ -2380,9 +2390,25 @@ class RLMEngine:
             query=task_text,
             has_ipython=has_ipython,
             can_delegate=has_ipython and self.depth < self.max_depth,
-            skills_dir=self._skills_dir,
+            skills_dir=str(self._kernel_skills_dir())
+            if self._skills_dir is not None
+            else None,
             prompts=self.prompts,
         )
+
+    def _kernel_skills_dir(self) -> Path:
+        """The skills root as the kernel sees it: in split execution, the worker's
+        mirror of it."""
+        session_dir = getattr(self._repl, "session_dir", None)
+        return Path(session_dir) / WORKER_DIR_NAME if session_dir else SKILLS_ROOT
+
+    def _kernel_skill_doc(self, doc: SkillDoc) -> SkillDoc:
+        """``doc`` with the location the kernel can read it at."""
+        location = Path(doc.location)
+        if not location.is_relative_to(SKILLS_ROOT):
+            return doc
+        kernel_location = self._kernel_skills_dir() / location.relative_to(SKILLS_ROOT)
+        return replace(doc, location=str(kernel_location))
 
     def _kernel_session_dir(self) -> str:
         """The session directory as the kernel sees it: in split execution, the
@@ -2405,7 +2431,7 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
-            skill_docs=skill_docs,
+            skill_docs=[self._kernel_skill_doc(doc) for doc in skill_docs],
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,

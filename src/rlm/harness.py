@@ -1057,10 +1057,16 @@ def harness(session_dir: str | Path | None = None) -> HarnessView:
     """The harness visible to this kernel.
 
     With no argument the view follows the ``RLM_HARNESS_*`` environment the engine set
-    at kernel start; a session directory loads that session's local store alone.
+    at kernel start; a session directory loads that session's local store alone. In
+    split execution the stores stay with the engine and the view reaches them through
+    the broker.
     """
     if session_dir is not None:
         return build_view(local_dir(session_dir))
+    from rlm.harness_remote import REMOTE_ENV, RemoteHarnessView
+
+    if os.environ.get(REMOTE_ENV) == "1":
+        return RemoteHarnessView()  # type: ignore[return-value]
     local = os.environ.get(LOCAL_DIR_ENV)
     if not local:
         raise RuntimeError("the continual harness is disabled for this session")

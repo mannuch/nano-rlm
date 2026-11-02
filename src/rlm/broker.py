@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import keyword
+import socket
 import struct
 import time
 from dataclasses import dataclass
@@ -303,6 +304,54 @@ class BrokerRefineRequest(TypedDict):
     rollback_id: Annotated[str, Field(min_length=1, max_length=128)] | None
 
 
+HarnessMethod = Literal[
+    "entries",
+    "list",
+    "get",
+    "search",
+    "refinements",
+    "counts",
+    "overview",
+    "snapshot",
+    "create",
+    "update",
+    "delete",
+    "record_refinement",
+    "create_memory",
+    "update_memory",
+    "delete_memory",
+    "create_prompt_note",
+    "update_prompt_note",
+    "delete_prompt_note",
+    "create_skill",
+    "update_skill",
+    "delete_skill",
+    "create_subagent",
+    "update_subagent",
+    "delete_subagent",
+]
+"""The ``HarnessView`` methods a split-execution kernel may call on its own view."""
+
+
+class BrokerHarnessCallRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["harness.call"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    method: HarnessMethod
+    args: list[Any]
+    kwargs: dict[str, Any]
+
+
+class BrokerHarnessHistoryRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["harness.history"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    session_dir: Annotated[str, Field(min_length=1, max_length=4096)]
+    offset: Annotated[int, Field(ge=0)]
+
+
 class BrokerToolsSearchRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["tools.search"]
@@ -361,6 +410,8 @@ BrokerRequest = Annotated[
     | BrokerShellEnvRequest
     | BrokerHintsRequest
     | BrokerRefineRequest
+    | BrokerHarnessCallRequest
+    | BrokerHarnessHistoryRequest
     | BrokerShellReadRequest
     | BrokerServicesStartRequest
     | BrokerServicesListRequest
@@ -448,18 +499,32 @@ def shell_wait(seconds: float) -> float:
     return min(seconds, max(0.0, _cell_deadline - time.monotonic() - 1.0))
 
 
-async def read_frame(
-    reader: asyncio.StreamReader, max_bytes: int = MAX_REQUEST_BYTES
-) -> dict[str, Any]:
-    header = await reader.readexactly(4)
+def _frame_size(header: bytes, max_bytes: int) -> int:
     size = struct.unpack(">I", header)[0]
     if size > max_bytes:
         raise ValueError(f"broker frame exceeds {max_bytes} bytes")
-    payload = await reader.readexactly(size)
+    return size
+
+
+def _frame_value(payload: bytes) -> dict[str, Any]:
     value = json.loads(payload)
     if not isinstance(value, dict):
         raise ValueError("broker frame must contain a JSON object")
     return value
+
+
+def _encode_frame(value: dict[str, Any], max_bytes: int) -> bytes:
+    payload = json.dumps(value, separators=(",", ":")).encode()
+    if len(payload) > max_bytes:
+        raise ValueError(f"broker frame exceeds {max_bytes} bytes")
+    return struct.pack(">I", len(payload)) + payload
+
+
+async def read_frame(
+    reader: asyncio.StreamReader, max_bytes: int = MAX_REQUEST_BYTES
+) -> dict[str, Any]:
+    size = _frame_size(await reader.readexactly(4), max_bytes)
+    return _frame_value(await reader.readexactly(size))
 
 
 async def write_frame(
@@ -467,10 +532,7 @@ async def write_frame(
     value: dict[str, Any],
     max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> None:
-    payload = json.dumps(value, separators=(",", ":")).encode()
-    if len(payload) > max_bytes:
-        raise ValueError(f"broker frame exceeds {max_bytes} bytes")
-    writer.write(struct.pack(">I", len(payload)) + payload)
+    writer.write(_encode_frame(value, max_bytes))
     await writer.drain()
 
 
@@ -488,6 +550,33 @@ async def agent_request(op: str, **arguments: Any) -> Any:
     )
     response = await _request(request)
     return response["result"]
+
+
+def request_sync(op: str, **arguments: Any) -> Any:
+    """``agent_request`` for synchronous kernel APIs: the same request and response
+    over a blocking socket, so it works from a cell, a coroutine or a thread alike."""
+    if _endpoint is None or _scope_id is None:
+        raise RuntimeError("agent operations are unavailable outside an active cell")
+    request = parse_request(
+        {
+            "op": op,
+            "capability": _endpoint.capability,
+            "scope_id": _scope_id,
+            **arguments,
+        }
+    )
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(_endpoint.socket_path)
+        connection.sendall(_encode_frame(request, MAX_REQUEST_BYTES))
+        with connection.makefile("rb") as stream:
+            header = stream.read(4)
+            if len(header) < 4:
+                raise RuntimeError("RLM supervisor closed the connection")
+            size = _frame_size(header, MAX_RESPONSE_BYTES)
+            payload = stream.read(size)
+            if len(payload) < size:
+                raise RuntimeError("RLM supervisor closed the connection")
+    return _checked_response(_frame_value(payload))["result"]
 
 
 async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
@@ -568,6 +657,10 @@ async def _request(payload: BrokerRequest) -> BrokerResponse:
     finally:
         writer.close()
         await writer.wait_closed()
+    return _checked_response(raw_response)
+
+
+def _checked_response(raw_response: dict[str, Any]) -> BrokerResponse:
     try:
         response = _RESPONSE_ADAPTER.validate_python(raw_response)
     except ValidationError:

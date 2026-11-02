@@ -751,6 +751,30 @@ inspectable and reversible by hand, while no in-session path can recreate an epi
 across RL rollouts of one task would let a rollout read another's outcome. A store that
 holds episodes cannot be read by builds that predate the kind.
 
+### In split execution
+
+With [separate tool execution](#separate-tool-execution) the harness keeps working as
+described above, while its state stays with the engine. The kernel gets
+`RLM_HARNESS_REMOTE=1` instead of the store paths, and `rlm.harness.harness()` returns a
+view with `HarnessView`'s methods, signatures and error types. Each call runs on the
+calling agent's own stores in the supervisor, through the broker, so the kernel never
+names a store and the stores' locks, ancestors and global sharing are unchanged. The
+store objects themselves (`h.local`, `h.layers()`) are not available in the kernel.
+
+The worker keeps a mirror of `$RLM_HOME/skills` in its session directory, filled before
+the kernel starts and updated before each tool call, so every skill the prompt lists is
+readable there. The prompt's skill paths, including `RLM_HARNESS_SKILLS_DIR`, name the
+mirror. With `author_skills` on, the kernel binds and writes authored packages in the
+mirror, and the files it changes return with each tool result to `$RLM_HOME/skills`.
+They persist there, and the engine announces them to every agent. The receiving side
+writes only regular files inside skill folders. It rejects absolute paths, `..`, and
+paths through symlinks, and never imports what it receives. Files over 4 MiB and
+bytecode are not mirrored.
+
+`history(session_dir)` for a path the worker doesn't have asks the supervisor. The
+supervisor serves the ledger in pages when the path is the `session_dir` of an episode
+in the agent's harness, and refuses any other path.
+
 ## Tools
 
 Tools are executable capabilities. They can be native model tool calls, Python callables in IPython, or shell commands. Skills are `SKILL.md` workflows that guide the agent's use of tools.
