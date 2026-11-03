@@ -92,6 +92,7 @@ The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_s
 | `max_total_tokens` | The tree reached `max_total_tokens` | `max_tokens` |
 | `token_budget` | The agent reached its `max_tokens` | `max_tokens` |
 | `compaction_failed` | A compaction failed with the context full | `max_tokens` |
+| `format_violation` | The final summary response was unusable | `end_turn` |
 | `cancelled` | The client cancelled the prompt | `cancelled` |
 | `refined` | A host [refinement](continual-harness.md#refinement) with an empty prompt was the whole turn | `end_turn` |
 
@@ -111,5 +112,6 @@ Each call also carries a private `X-ACP-Model-Request-ID`. Responses publish spa
 | `compaction_attempt` | Each summary or rollup call of a compaction, from the request that triggered it |
 | `refinement_attempt` | Each planning call of a refinement pass, from the last work request |
 | `refinement` | An applied refinement plan into the next work request |
+| `format_violation` | The terminal unusable summary; retained for zero-reward training |
 
 Clients that do not understand the extension ignore it.
