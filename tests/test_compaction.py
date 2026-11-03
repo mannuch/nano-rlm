@@ -28,6 +28,7 @@ from rlm.compaction import (
     STAIRCASE_FRAMING,
     hollow_middle,
     CompactionFailed,
+    CompactionFormatViolation,
     is_context_overflow,
     prompt_pointer_note,
 )
@@ -227,7 +228,8 @@ def test_staircase_shows_children_of_a_missing_rollup():
     )
 
 
-async def test_compaction_attempt_limit_is_configurable(session):
+@pytest.mark.parametrize("attempts", [1, 2])
+async def test_compaction_attempt_limit_is_configurable(session, attempts):
     client = _ScriptedClient(
         [
             _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})])),
@@ -237,7 +239,7 @@ async def test_compaction_attempt_limit_is_configurable(session):
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(max_compaction_attempts=2),
+        runtime_config=_config(max_compaction_attempts=attempts),
     )
     messages = [
         {"role": "system", "content": "system"},
@@ -246,12 +248,14 @@ async def test_compaction_attempt_limit_is_configurable(session):
     session.replace_context(messages, reason="start")
 
     try:
-        with pytest.raises(CompactionFailed, match="after 2 attempts"):
+        with pytest.raises(
+            CompactionFormatViolation, match=f"after {attempts} attempts"
+        ):
             await engine._compact_branch(messages, turn=0)
     finally:
         engine.close()
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == attempts
 
 
 @pytest.mark.parametrize(
