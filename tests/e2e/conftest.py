@@ -25,6 +25,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,8 +148,7 @@ class AgentSession:
 
     @property
     def session_dir(self) -> Path:
-        (session_dir,) = (self.home / "sessions").iterdir()
-        return session_dir
+        return self.home / "sessions" / self.session_id
 
     @property
     def records(self) -> list[dict[str, Any]]:
@@ -286,9 +286,9 @@ def agent(tmp_path, mode):
         skill_docs: dict[str, str] | None = None,
         mcp_servers: Sequence[Any] = (),
         policy: dict[str, Any] | None = None,
+        harness: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentSession]:
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace = Path(tempfile.mkdtemp(prefix="workspace-", dir=tmp_path))
         for name, text in (files or {}).items():
             (workspace / name).write_text(text)
         home = tmp_path / "rlm"
@@ -307,6 +307,8 @@ def agent(tmp_path, mode):
             "kernel_env": {},
             "search_api_key": None,
         }
+        if harness is not None:
+            runtime["harness"] = harness
         if mode == "stdio":
             runtime["execution_command"] = [sys.executable, "-m", "rlm.execution"]
             runtime["execution_cwd"] = str(workspace)
