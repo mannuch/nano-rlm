@@ -148,4 +148,27 @@ async def history(session_dir: str | Path | None = None) -> History:
         session_dir = os.environ.get("RLM_SESSION_DIR")
         if not session_dir:
             raise RuntimeError("pass a session directory when outside an RLM kernel")
+    from rlm.harness_remote import REMOTE_ENV
+
+    if (
+        os.environ.get(REMOTE_ENV) == "1"
+        and not (Path(session_dir) / "messages.jsonl").exists()
+    ):
+        return await _episode_history(str(session_dir))
     return History(session_dir)
+
+
+async def _episode_history(session_dir: str) -> History:
+    """A past session's ledger, which in split execution stays on the engine's machine:
+    the supervisor serves an episode this agent's harness can see, in pages."""
+    from rlm import broker
+
+    events: list[dict] = []
+    offset: int | None = 0
+    while offset is not None:
+        page = await broker.agent_request(
+            "harness.history", session_dir=session_dir, offset=offset
+        )
+        events += page["records"]
+        offset = page["next"]
+    return History.from_events(session_dir, events)

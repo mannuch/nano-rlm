@@ -24,7 +24,9 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+from rlm import skills_sync
 from rlm.broker import BrokerEndpoint
+from rlm.harness import SKILLS_DIR_ENV
 from rlm.tools.ipython import IPythonREPL, build_kernel_env
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.output import OutputSize
@@ -170,9 +172,16 @@ class RemoteREPL(IPythonREPL):
         tcp=None,
         transport: ExecutionTransport | None = None,
         tools=("ipython",),
+        skills_root: Path | None = None,
+        write_back: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # The persistent skills root this worker mirrors; with write_back, packages the
+        # kernel writes come back to it.
+        self.skills_root = skills_root
+        self.write_back = write_back
+        self._skills_seen: skills_sync.Manifest = {}
         if sum(option is not None for option in (command, tcp, transport)) != 1:
             raise ValueError("choose one execution transport")
         validate_tools(tools)
@@ -223,6 +232,8 @@ class RemoteREPL(IPythonREPL):
         modules = {
             path.name: path.read_text() for path in self.session.dir.glob("*.py")
         }
+        self._skills_seen = {}
+        self._push_skills()
         self.session_dir = self._peer.call(
             "start",
             {
@@ -237,9 +248,23 @@ class RemoteREPL(IPythonREPL):
                 if self.broker_endpoint
                 else None,
                 "modules": modules,
+                "harness_dirs": self.harness_dirs,
+                "author_skills": self.write_back,
             },
             timeout=120,
         )
+
+    def _push_skills(self):
+        """Send the skills root's changes since the last push, if any."""
+        if self.skills_root is None:
+            return
+        while True:
+            batch, self._skills_seen = skills_sync.collect(
+                self.skills_root, self._skills_seen
+            )
+            if batch is None:
+                return
+            self._peer.call("skills.sync", batch)
 
     def execute_tool(self, name, args):
         if self._control_done is not None:
@@ -257,6 +282,7 @@ class RemoteREPL(IPythonREPL):
         for chunk in head:
             self._peer.call("history", self._history_chunk(chunk))
             self._history_sent += len(chunk)
+        self._push_skills()
         result = self._peer.call(
             "tool",
             {
@@ -267,6 +293,9 @@ class RemoteREPL(IPythonREPL):
             },
         )
         self._history_sent += len(last)
+        if self.write_back and result.get("skills"):
+            written, removed = skills_sync.apply(self.skills_root, result["skills"])
+            skills_sync.fold(self._skills_seen, written, removed)
         self._recovery_notices.extend(result["notices"])
         with open(self.session.dir / "programmatic_tool_calls.jsonl", "ab") as log:
             log.write(base64.b64decode(result["tool_log"]))
@@ -327,6 +356,11 @@ class _Worker:
         self.closed = threading.Event()
         self._tool_log_sent = 0
         self.host = None
+        # The harness's skills root, mirrored; returned changes only when authoring.
+        self.skills_dir = self.session_dir / skills_sync.WORKER_DIR_NAME
+        self.skills_dir.mkdir()
+        self._skills_seen: skills_sync.Manifest = {}
+        self._author_skills = False
 
     def _accept(self):
         while not self.closed.is_set():
@@ -351,12 +385,23 @@ class _Worker:
                 pass  # interrupted kernels close their pending callbacks
 
     def handle(self, method, params):
+        if method == "skills.sync":
+            written, removed = skills_sync.apply(self.skills_dir, params)
+            skills_sync.fold(self._skills_seen, written, removed)
+            return {}
         if method == "start":
             if self.repl is not None:
                 raise ValueError("execution session already started")
             params = dict(params)
             self.tools = params.pop("tools")
             validate_tools(self.tools)
+            self._author_skills = params.pop("author_skills", False)
+            if self._author_skills:
+                params["skills_dir"] = str(self.skills_dir)
+                params["harness_dirs"] = {
+                    **(params.get("harness_dirs") or {}),
+                    SKILLS_DIR_ENV: str(self.skills_dir),
+                }
             modules = params.pop("modules")
             for name, source in modules.items():
                 if Path(name).name != name or not name.endswith(".py"):
@@ -409,12 +454,18 @@ class _Worker:
                 if tool is None:
                     raise ValueError("tool is not enabled for this execution session")
                 outcome = tool.execute(params["args"], self.context)
+                skills = None
+                if self._author_skills:
+                    skills, self._skills_seen = skills_sync.collect(
+                        self.skills_dir, self._skills_seen
+                    )
                 return {
                     "output": outcome.content,
                     "omitted": outcome.omitted and asdict(outcome.omitted),
                     "metric_events": [asdict(event) for event in outcome.metric_events],
                     "notices": self.repl.take_recovery_notices(),
                     "tool_log": base64.b64encode(self._new_tool_log()).decode(),
+                    "skills": skills,
                 }
 
             return self.repl._executor.submit(execute).result()

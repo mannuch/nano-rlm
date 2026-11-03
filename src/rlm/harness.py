@@ -65,9 +65,6 @@ STATE_FILE_NAME = "harness_state.json"
 RESULTS_FILE_NAME = "refinements.jsonl"
 HARNESS_DIR_NAME = "harness"
 
-LOCAL_DIR_ENV = "RLM_HARNESS_LOCAL_DIR"
-GLOBAL_DIR_ENV = "RLM_HARNESS_GLOBAL_DIR"
-ANCESTOR_DIRS_ENV = "RLM_HARNESS_ANCESTOR_DIRS"
 SKILLS_DIR_ENV = "RLM_HARNESS_SKILLS_DIR"
 
 
@@ -1056,22 +1053,20 @@ def build_view(
 def harness(session_dir: str | Path | None = None) -> HarnessView:
     """The harness visible to this kernel.
 
-    With no argument the view follows the ``RLM_HARNESS_*`` environment the engine set
-    at kernel start; a session directory loads that session's local store alone.
+    With no argument the view holds this agent's layers, which the supervisor serves
+    through the broker, so calls need an active cell. A session directory loads that
+    session's local store alone; in split execution a past episode's store stays on
+    the engine's machine and the supervisor serves it read-only.
     """
+    from rlm.harness_remote import BROKERED_ENV, REMOTE_ENV, RemoteHarnessView
+
     if session_dir is not None:
+        if os.environ.get(REMOTE_ENV) == "1" and not local_dir(session_dir).exists():
+            return RemoteHarnessView(session_dir)  # type: ignore[return-value]
         return build_view(local_dir(session_dir))
-    local = os.environ.get(LOCAL_DIR_ENV)
-    if not local:
+    if os.environ.get(BROKERED_ENV) != "1":
         raise RuntimeError("the continual harness is disabled for this session")
-    ancestors = [
-        d for d in os.environ.get(ANCESTOR_DIRS_ENV, "").split(os.pathsep) if d
-    ]
-    return build_view(
-        local,
-        global_dir=os.environ.get(GLOBAL_DIR_ENV) or None,
-        ancestor_dirs=ancestors,
-    )
+    return RemoteHarnessView()  # type: ignore[return-value]
 
 
 def load_skills(*names: str) -> dict[str, str | None]:

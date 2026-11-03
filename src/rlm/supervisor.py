@@ -1091,6 +1091,29 @@ class SessionTreeSupervisor:
             **layers["env"],
         }
 
+    def _harness_operation(self, parent: _Invocation, request: dict) -> Any:
+        """A kernel's harness call or episode read, against the view its engine
+        builds: the kernel names no store, and reads only past sessions its harness
+        records as episodes."""
+        from rlm.harness import build_view, local_dir
+        from rlm.harness_remote import agent_view, dispatch, visible_episode
+        from rlm.history import read_page
+
+        view = agent_view(
+            parent.session.dir,
+            parent.runtime_config.harness,
+            parent.runtime_config.invocation.ancestor_harness_dirs,
+        )
+        if request["op"] == "harness.call":
+            call = (request["method"], request["args"], request["kwargs"])
+            if "session_dir" not in request:
+                return dispatch(view, *call)
+            episode = visible_episode(view, request["session_dir"])
+            return dispatch(build_view(local_dir(episode)), *call, read_only=True)
+        episode = visible_episode(view, request["session_dir"])
+        records, offset = read_page(episode / "messages.jsonl", request["offset"])
+        return {"records": records, "next": offset}
+
     async def _services_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
         if op == "services.start":
@@ -1207,6 +1230,8 @@ class SessionTreeSupervisor:
                 "rollback_id": request["rollback_id"],
             }
             return {"scheduled": True}
+        if op in {"harness.call", "harness.history"}:
+            return await asyncio.to_thread(self._harness_operation, parent, request)
         if op == "inbox.list":
             return [
                 {

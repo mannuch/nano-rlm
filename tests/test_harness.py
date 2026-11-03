@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
+import sys
+from pathlib import Path
 
 import pytest
 from conftest import (
@@ -19,6 +22,7 @@ from rlm.config import ExecutionPolicy, HarnessConfig, InvocationContext, Runtim
 from rlm.engine import RLMEngine
 from rlm.history import read_records
 from rlm.harness import (
+    HarnessEntry,
     HarnessStore,
     HarnessView,
     episode_path,
@@ -27,6 +31,7 @@ from rlm.harness import (
     local_dir,
     query_terms,
 )
+from rlm.harness_remote import METHODS, RemoteHarnessView, agent_view, decode, dispatch
 from rlm.prompt import HARNESS_INTRO, render_harness
 from rlm.session import Session
 from rlm.tools.skills import discover_skill_docs
@@ -211,25 +216,42 @@ def test_harness_config_and_ancestor_context():
 
 
 def test_harness_env_resolution(tmp_path, monkeypatch):
-    monkeypatch.delenv("RLM_HARNESS_LOCAL_DIR", raising=False)
+    monkeypatch.delenv("RLM_HARNESS_BROKERED", raising=False)
+    monkeypatch.delenv("RLM_HARNESS_REMOTE", raising=False)
     with pytest.raises(RuntimeError, match="disabled"):
         harness()
     explicit = harness(session_dir=tmp_path / "s")
     assert explicit.local.dir == local_dir(tmp_path / "s").resolve()
 
-    monkeypatch.setenv("RLM_HARNESS_LOCAL_DIR", str(tmp_path / "l"))
-    monkeypatch.setenv("RLM_HARNESS_GLOBAL_DIR", "")
-    monkeypatch.setenv(
-        "RLM_HARNESS_ANCESTOR_DIRS", str(tmp_path / "a1") + ":" + str(tmp_path / "a2")
-    )
+    monkeypatch.setenv("RLM_HARNESS_BROKERED", "1")
     view = harness()
-    assert view.global_ is None
-    assert [s.dir.name for s in view.ancestors] == ["a1", "a2"]
+    assert isinstance(view, RemoteHarnessView)
+    with pytest.raises(RuntimeError, match="outside an active cell"):
+        view.list("memory")
+    with pytest.raises(AttributeError, match="keeps out of the kernel"):
+        view.local  # noqa: B018
+
+    monkeypatch.setenv("RLM_HARNESS_REMOTE", "1")
+    assert isinstance(harness(session_dir=tmp_path / "elsewhere"), RemoteHarnessView)
+    assert isinstance(harness(session_dir=tmp_path / "s"), RemoteHarnessView)
+    (local_dir(tmp_path / "s")).mkdir(parents=True)
+    assert harness(session_dir=tmp_path / "s").local.dir == explicit.local.dir
 
 
-async def test_engine_renders_harness_and_kernel_writes_to_it(session, tmp_path):
-    """The kernel's rlm.harness view targets the session's store, and the system
-    prompt carries the harness block with what was already recorded."""
+def _split(config: RuntimeConfig) -> RuntimeConfig:
+    return config.model_copy(
+        update={
+            "execution_command": (sys.executable, "-m", "rlm.execution"),
+            "builtin_tools": ("ipython",),
+        }
+    )
+
+
+@pytest.mark.parametrize("split", [False, True])
+async def test_engine_renders_harness_and_kernel_writes_to_it(session, tmp_path, split):
+    """The kernel's rlm.harness view targets the session's store through the broker,
+    with the view's errors and without its path, and the system prompt carries the
+    harness block with what was already recorded."""
     global_dir = tmp_path / "global"
     HarnessStore(global_dir, scope="global").create(
         "prompt", "Global policy", "verify before claiming success"
@@ -238,7 +260,14 @@ async def test_engine_renders_harness_and_kernel_writes_to_it(session, tmp_path)
         "h = rlm.harness.harness()\n"
         "h.create_memory('Kernel lesson', 'written from the kernel')\n"
         "print(h.get('prompt', 'global:global_policy').content)\n"
-        "print(h.local.dir)"
+        "try:\n"
+        "    h.create_memory('Kernel lesson', 'again')\n"
+        "except ValueError as error:\n"
+        "    print('ValueError:', error)\n"
+        "try:\n"
+        "    print(h.local.dir)\n"
+        "except AttributeError as error:\n"
+        "    print(error)\n"
     )
     client = DummyClient(
         [
@@ -247,13 +276,17 @@ async def test_engine_renders_harness_and_kernel_writes_to_it(session, tmp_path)
         ]
     )
     config = make_runtime_config(harness=HarnessConfig(global_dir=str(global_dir)))
+    if split:
+        config = _split(config)
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
     result = await engine.run("remember things")
 
     output = tool_result(client)
     assert "verify before claiming success" in output
-    assert str(local_dir(session.dir).resolve()) in output
+    assert "ValueError:" in output
+    assert "keeps out of the kernel" in output
+    assert str(local_dir(session.dir).resolve()) not in output
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert HARNESS_INTRO in system_prompt
     assert "[global:global_policy] Global policy" in system_prompt
@@ -275,7 +308,7 @@ async def test_disabled_harness_leaves_prompt_and_kernel_untouched(session):
                     DummyToolCall(
                         "ipython",
                         {
-                            "code": "import os; print(os.environ.get('RLM_HARNESS_LOCAL_DIR'))"
+                            "code": "import os; print(os.environ.get('RLM_HARNESS_BROKERED'))"
                         },
                     )
                 ]
@@ -400,9 +433,12 @@ def test_list_authored_skills_checks_the_contract_without_importing(tmp_path):
     assert list_authored_skills(SKILL_FIXTURES_DIR) == []
 
 
+@pytest.mark.parametrize("split", [False, True])
 async def test_authored_packages_are_importable_in_the_kernel(
-    session, tmp_path, monkeypatch
+    session, tmp_path, monkeypatch, split
 ):
+    """Under split execution the worker's kernel imports a mirror of the skills root,
+    and the prompt names the mirror."""
     root = tmp_path / "skills"
     monkeypatch.setattr("rlm.engine.SKILLS_ROOT", root)
     _write_package(
@@ -423,7 +459,7 @@ async def test_authored_packages_are_importable_in_the_kernel(
         "        await bad()\n"
         "    except RuntimeError as e:\n"
         "        print(e)\n"
-        "print(os.environ['RLM_HARNESS_SKILLS_DIR'] == " + repr(str(root)) + ")"
+        "print(os.environ['RLM_HARNESS_SKILLS_DIR'])"
     )
     client = DummyClient(
         [
@@ -432,11 +468,15 @@ async def test_authored_packages_are_importable_in_the_kernel(
         ]
     )
     config = make_runtime_config(harness=HarnessConfig(author_skills=True))
+    if split:
+        config = _split(config)
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
     await engine.run("use the authored skill")
 
     output = tool_result(client)
+    kernel_root = Path(output.strip().splitlines()[-1])
+    assert (kernel_root != root) is split
     assert "3 words" in output
     assert "(text: str, top: int = 5)" in output
     assert "Call `await undocumented(...)`." in output
@@ -444,25 +484,31 @@ async def test_authored_packages_are_importable_in_the_kernel(
     assert "definitely_missing_module" in output
     assert "'sync_run' is unusable: it must define `async def run(...)`" in output
     assert "'no_md' is unusable: expected no_md/SKILL.md" in output
-    assert output.strip().endswith("True")
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert "`word_count`" in system_prompt and "`broken`" in system_prompt
-    assert f"persist across sessions under {root}" in system_prompt
-    assert f"- word_count: (file: {root / 'word_count' / 'SKILL.md'})" in system_prompt
+    assert f"persist across sessions under {kernel_root}" in system_prompt
+    assert (
+        f"- word_count: (file: {kernel_root / 'word_count' / 'SKILL.md'})"
+        in system_prompt
+    )
     assert engine.execution_snapshot()["limits"]["harness_author_skills"] is True
 
 
+@pytest.mark.parametrize("split", [False, True])
 async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
-    session, tmp_path, monkeypatch
+    session, tmp_path, monkeypatch, split
 ):
+    """Under split execution a package written in the worker's mirror comes back to
+    the skills root, where the engine announces it at the path the kernel sees."""
     root = tmp_path / "skills"
     monkeypatch.setattr("rlm.engine.SKILLS_ROOT", root)
     write_package = (
         "from pathlib import Path\n"
-        f"pkg = Path({str(root)!r}) / 'greeter' / 'src' / 'greeter'\n"
+        "root = Path(os.environ['RLM_HARNESS_SKILLS_DIR'])\n"
+        "pkg = root / 'greeter' / 'src' / 'greeter'\n"
         "pkg.mkdir(parents=True, exist_ok=True)\n"
         "(pkg / '__init__.py').write_text(BODY)\n"
-        f"(Path({str(root)!r}) / 'greeter' / 'SKILL.md').write_text('# greeter')\n"
+        "(root / 'greeter' / 'SKILL.md').write_text('# greeter')\n"
     )
     first = (
         "BODY = 'async def run(name: str) -> str:\\n    return f\"hi {name}\"\\n'\n"
@@ -470,6 +516,7 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
         + "print(rlm.harness.load_skills())\n"
         "print(await greeter(name='ann'))\n"
         "print(rlm.harness.load_skills('say', 'nope'))\n"
+        "print(root)\n"
     )
     second = (
         "BODY = 'async def run(name: str) -> str:\\n    return f\"bye {name}\"\\n'\n"
@@ -486,11 +533,15 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
         ]
     )
     config = make_runtime_config(harness=HarnessConfig(author_skills=True))
+    if split:
+        config = _split(config)
     engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
 
     await engine.run("author a skill")
 
     output = tool_result(client)
+    kernel_root = Path(output.strip().splitlines()[-1])
+    assert (kernel_root != root) is split
     assert "{'greeter': None}" in output and "hi ann" in output
     assert "'say': \"'say' is an installed or generated Python tool\"" in output
     assert "'nope': \"no package 'nope' under" in output
@@ -508,7 +559,7 @@ async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
         if '<runtime_event kind="skills">' in str(m.get("content"))
     ]
     assert len(notices) == 1
-    assert f"- greeter: (file: {root / 'greeter' / 'SKILL.md'})" in notices[0]
+    assert f"- greeter: (file: {kernel_root / 'greeter' / 'SKILL.md'})" in notices[0]
     assert 'rlm.harness.load_skills("<name>")' in notices[0]
     later = [str(m.get("content")) for m in client.calls[2]["messages"]]
     assert sum('<runtime_event kind="skills">' in c for c in later) == 1
@@ -795,3 +846,96 @@ def test_view_methods_are_self_documenting():
         and not (getattr(HarnessView, name).__doc__ or "").strip()
     ]
     assert undocumented == []
+
+
+def test_remote_harness_dispatch_mirrors_the_view(tmp_path):
+    """A kernel's calls run on the view its engine would build, and come back with the
+    same values, layers and error types."""
+    parent = tmp_path / "parent"
+    HarnessStore(parent).create("memory", "Parent lesson", "from the parent")
+    view = agent_view(
+        tmp_path / "child",
+        HarnessConfig(global_dir=str(tmp_path / "g")),
+        (str(parent),),
+    )
+
+    def call(method, *args, **kwargs):
+        response = dispatch(view, method, list(args), kwargs)
+        return json.loads(json.dumps(response))
+
+    entry = decode(call("create_memory", "Lesson", "content")["value"])
+    assert isinstance(entry, HarnessEntry) and entry.id == "lesson"
+    entries = decode(call("entries", "memory")["value"])
+    assert [(layer, e.id) for layer, e in entries] == [
+        ("local", "lesson"),
+        ("ancestor", "parent_lesson"),
+    ]
+    assert call("create_memory", "Lesson", "again")["raised"]["type"] == "ValueError"
+    assert (
+        call("delete_memory", "ancestor:parent_lesson")["raised"]["type"]
+        == "PermissionError"
+    )
+    assert dispatch(view, "list", ["memory"], {}, read_only=True)["value"]
+    assert dispatch(view, "create_memory", ["New", "x"], {}, read_only=True) == {
+        "raised": {
+            "type": "PermissionError",
+            "message": "another session's harness is read-only",
+        }
+    }
+    assert dispatch(None, "list", [], {}) == {
+        "raised": {
+            "type": "RuntimeError",
+            "message": "the continual harness is disabled for this session",
+        }
+    }
+    assert agent_view(tmp_path, HarnessConfig(enabled=False), ()) is None
+    for name in METHODS:
+        remote, local = getattr(RemoteHarnessView, name), getattr(HarnessView, name)
+        assert inspect.signature(remote) == inspect.signature(local)
+        assert remote.__doc__ == local.__doc__
+
+
+async def test_split_kernel_reads_a_past_episode_through_the_supervisor(
+    session, tmp_path
+):
+    """An episode's session directory is on the engine's machine; the supervisor
+    serves its ledger and store to a split kernel, and nothing else."""
+    harness_config = HarnessConfig(
+        global_dir=str(tmp_path / "global"), record_episodes=True
+    )
+    past = Session(tmp_path / "past")
+    await RLMEngine(
+        client=DummyClient([DummyMessage(content="fixed the parser")]),  # type: ignore
+        session=past,
+        runtime_config=make_runtime_config(harness=harness_config),
+    ).run("fix the parser")
+    code = (
+        "(episode,) = rlm.harness.harness().list('episode')\n"
+        "past = await rlm.history(episode.metadata['session_dir'])\n"
+        "print(past.user_messages()[0]['content'])\n"
+        "try:\n"
+        f"    await rlm.history({str(tmp_path / 'elsewhere')!r})\n"
+        "except RuntimeError as error:\n"
+        "    print('refused:', error)\n"
+        "try:\n"
+        f"    rlm.harness.harness({str(tmp_path / 'elsewhere')!r}).list('memory')\n"
+        "except RuntimeError as error:\n"
+        "    print('store refused:', error)\n"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})]),
+            DummyMessage(content="ok"),
+        ]
+    )
+    config = _split(make_runtime_config(harness=harness_config))
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    await engine.run("what did the last session do?")
+
+    output = tool_result(client)
+    assert "fix the parser" in output
+    assert (
+        "refused:" in output and "is not an episode in this agent's harness" in output
+    )
+    assert "store refused:" in output

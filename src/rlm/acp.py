@@ -143,6 +143,7 @@ class _LimitsSnapshot(_ContractModel):
     compaction_tail_tokens: int = Field(ge=0)
     compaction_prompt_tokens: int = Field(ge=0)
     allow_git: bool
+    network_guidance: bool
     harness_enabled: bool
     harness_global: bool
     auto_refine: bool
