@@ -11,10 +11,10 @@ CODEWORD = "copper-heron-917"
 VAULT_STAMP = "vault-5d2e"
 
 
-def _ran(session, snippet: str) -> bool:
-    """Whether one of the root agent's ipython cells contains `snippet`."""
+def _ran(session, pattern: str) -> bool:
+    """Whether one of the root agent's ipython cells matches `pattern`."""
     return any(
-        snippet in json.loads(call["function"]["arguments"]).get("code", "")
+        re.search(pattern, json.loads(call["function"]["arguments"]).get("code", ""))
         for call in session.tool_call_records()
         if call["function"]["name"] == "ipython"
     )
@@ -67,7 +67,8 @@ async def test_authored_skill_works_in_the_next_session(agent):
             "Call your vault tool and write exactly what it returns to answer.txt."
         )
     assert second.read("answer.txt") == VAULT_STAMP, second.describe()
-    assert _ran(second, "vault("), second.describe()
+    # The bound tool is a callable module: `vault()` and `vault.run()` both call it.
+    assert _ran(second, r"\bvault(\.run)?\("), second.describe()
 
 
 async def test_next_session_reads_a_past_episode(agent, tmp_path):
@@ -91,4 +92,4 @@ async def test_next_session_reads_a_past_episode(agent, tmp_path):
             "conversation with `history`, and write the token to answer.txt."
         )
     assert second.read("answer.txt") in printed, (printed, second.describe())
-    assert _ran(second, "history("), second.describe()
+    assert _ran(second, r"\bhistory\("), second.describe()
