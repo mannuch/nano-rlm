@@ -152,6 +152,8 @@ Rollups are best effort: one compaction spends at most `max_compaction_attempts`
 
 A provider overflow (a 400 or 413 naming a context limit) triggers the same compaction reactively from the current state. A rejected checkpoint request falls back to the last state that passed a threshold check - by definition a state with a full reserve of room - and an empty or tool-calling reply is resampled; after `max_compaction_attempts` failed attempts the run ends cleanly with what the conversation holds. An overflow with no history beyond the task propagates: the task alone approaches the window and there is nothing to reclaim. Summary and rollup calls are side requests: they spend tokens but are not work turns, and each carries a `compaction_attempt` semantic edge from the request that triggered the compaction, with the single `compaction` edge sourced from the branch summary.
 
+For training, set `max_compaction_attempts: 1`. An unusable final summary (empty, tool-calling, or not normally terminated) ends the prompt with `format_violation`. Its terminal attempt is advertised as a `format_violation` semantic edge so a trainer can retain those tokens and assign zero reward. Earlier discarded attempts remain separate. A rejected provider request or an exhausted context-recovery path remains `compaction_failed`, without a format-violation edge. Only the branch summary can end a prompt this way: an unusable rollup is skipped as above.
+
 ## Tool output
 
 A tool result longer than 20 KB (`max_tool_output_bytes`) enters the conversation as its first and last 10 KB around a notice with the whole output's token estimate, line count and omitted bytes. The full result stays in the ledger.

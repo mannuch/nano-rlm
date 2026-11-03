@@ -34,6 +34,7 @@ from rlm.compaction import (
     TOOL_OUTPUT_MAX_BYTES,
     PINNED_PROMPT_NOTE,
     CompactionFailed,
+    CompactionFormatViolation,
     REPL_NOTE,
     compactable,
     discover_threshold,
@@ -1005,10 +1006,14 @@ class RLMEngine:
             self._turn = turn + 1
             try:
                 response, usage = await self._complete(messages, turn)
-            except CompactionFailed:
+            except CompactionFailed as error:
                 # The context is exhausted and could not be summarized: end the run
                 # cleanly with what the conversation holds - still a trainable sample.
-                self._metrics.stop_reason = "compaction_failed"
+                self._metrics.stop_reason = (
+                    "format_violation"
+                    if isinstance(error, CompactionFormatViolation)
+                    else "compaction_failed"
+                )
                 final_text = "[context exhausted: compaction failed]"
                 break
             call_id = self._last_call_id
@@ -1247,8 +1252,12 @@ class RLMEngine:
             if self._should_compact(messages, usage, content):
                 try:
                     await self._compact_branch(messages, turn)
-                except CompactionFailed:
-                    self._metrics.stop_reason = "compaction_failed"
+                except CompactionFailed as error:
+                    self._metrics.stop_reason = (
+                        "format_violation"
+                        if isinstance(error, CompactionFormatViolation)
+                        else "compaction_failed"
+                    )
                     final_text = "[context exhausted: compaction failed]"
                     break
 
@@ -1686,7 +1695,11 @@ class RLMEngine:
         except BaseException as exc:
             self._semantic_edges.finish_compaction(
                 compaction.compaction_id,
-                "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+                "cancelled"
+                if isinstance(exc, asyncio.CancelledError)
+                else "format_violation"
+                if isinstance(exc, CompactionFormatViolation)
+                else "failed",
             )
             raise
 
@@ -1815,6 +1828,10 @@ class RLMEngine:
             text = _side_reply_text(response)
             if text:
                 return text, usage
+            if last_attempt:
+                raise CompactionFormatViolation(
+                    f"no usable summary after {self.max_compaction_attempts} attempts"
+                )
             self._semantic_edges.release_summary_request(compaction.compaction_id)
             if (
                 not last_attempt
