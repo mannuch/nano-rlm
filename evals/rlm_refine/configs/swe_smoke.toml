@@ -11,7 +11,7 @@ subset = "hard51"
 
 [env.agent.harness]
 id = "rlm-refine"
-version = "a71dd76e2d9dc8904899058c636630e32b5014eb"
+version = "dbd42782134f6b765da7d9028c1393f9dbf8622f"
 forward_env = ["TYPESAFE_API_KEY"]
 
 [env.agent.harness.policy]
