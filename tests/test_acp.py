@@ -158,6 +158,7 @@ class _Engine:
                 "max_tokens": None,
                 "compaction": False,
                 "summarize_at_tokens": None,
+                "summary_budget_tokens": 24576,
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "compaction_fanout": 5,
