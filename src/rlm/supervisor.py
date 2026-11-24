@@ -242,7 +242,7 @@ class SessionTreeSupervisor:
                 capability=capability,
                 name="search",
                 description=(
-                    "Run a web search via Serper and return formatted title, URL, "
+                    "Run a web search and return formatted title, URL, "
                     "and snippet results."
                 ),
                 input_schema={
@@ -354,6 +354,7 @@ class SessionTreeSupervisor:
         return await run_search(
             self._root_config.search_api_key,
             network_block=self._root_config.network_block,
+            provider=self._root_config.search_provider,
             **arguments,
         )
 

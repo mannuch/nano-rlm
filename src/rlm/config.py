@@ -14,6 +14,7 @@ from typing_extensions import Self
 
 from rlm.network import NetworkBlocklist
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
+from rlm.skills.search import SearchProvider
 
 
 class _ConfigModel(BaseModel):
@@ -243,6 +244,8 @@ class RuntimeConfig(_ConfigModel):
     """Trusted argv launching an rlm.execution worker in the task environment."""
     execution_tcp: TcpExecutionConfig | None = None
     search_api_key: str | None = Field(default=None, repr=False)
+    search_provider: SearchProvider = "serper"
+    """Backend of the ``search`` skill; ``search_api_key`` is this provider's key."""
     harness: HarnessConfig = HarnessConfig()
     prompt_overrides: dict[str, str] = Field(default_factory=dict)
     """Replacement texts for named runtime prompts (see ``rlm.prompt.DEFAULT_PROMPTS``),
