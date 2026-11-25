@@ -46,9 +46,13 @@ def load(path: str, metric: str) -> list[dict]:
         errors = trace.get("errors") or []
         metrics = trace.get("metrics") or {}
         reward = (trace.get("rewards") or {}).get("solved", {}).get("score")
-        usage = [call["usage"] for call in trace.get("calls") or [] if call.get("usage")]
+        usage = [
+            call["usage"] for call in trace.get("calls") or [] if call.get("usage")
+        ]
         model_cost = sum(u.get("cost") or 0 for u in usage)
-        judge_cost = (metrics.get("judge_input_tokens") or 0) * TYPESAFE_USD_PER_INPUT_TOKEN
+        judge_cost = (
+            metrics.get("judge_input_tokens") or 0
+        ) * TYPESAFE_USD_PER_INPUT_TOKEN
         values = {"reward": reward, "cost": model_cost + judge_cost}
         rows.append(
             {
@@ -58,7 +62,10 @@ def load(path: str, metric: str) -> list[dict]:
                 "stop": trace.get("stop_condition"),
                 "model_cost": model_cost,
                 "judge_cost": judge_cost,
-                "input": sum(u.get("prompt_tokens", 0) + u.get("cached_input_tokens", 0) for u in usage),
+                "input": sum(
+                    u.get("prompt_tokens", 0) + u.get("cached_input_tokens", 0)
+                    for u in usage
+                ),
                 "cached": sum(u.get("cached_input_tokens", 0) for u in usage),
                 "metrics": metrics,
             }
@@ -95,7 +102,9 @@ def main(args: list[str]) -> None:
     for name, rows in arms.items():
         errors = Counter(r["error"] for r in rows if r["error"])
         stops = Counter(r["stop"] for r in rows)
-        ok = scored[name] or [{"model_cost": 0, "judge_cost": 0, "input": 0, "cached": 0}]
+        ok = scored[name] or [
+            {"model_cost": 0, "judge_cost": 0, "input": 0, "cached": 0}
+        ]
         model = st.mean(r["model_cost"] for r in ok)
         judge = st.mean(r["judge_cost"] for r in ok)
         cached = sum(r["cached"] for r in ok) / max(1, sum(r["input"] for r in ok))
